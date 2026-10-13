@@ -200,6 +200,20 @@ swiftc -O -o /tmp/genicon Tools/IconGenerator/main.swift
 `package.sh` 会自动调用它，用 `sips` 缩出全套尺寸、`iconutil` 打成 `.icns` 塞进 App 包。
 改图标只要改这个 Swift 文件。
 
+- **本机 Swift 版本和 CI 不一样**：本机是 Swift 6.4（Command Line Tools），
+  CI 是 Swift 5.10（macOS runner 上的 Xcode）。同一个写法在 6.4 下能过，在 5.10 下可能是**硬错误**。
+  已经踩过一次：
+
+  ```swift
+  var result: T?
+  Task { result = try? await operation(); semaphore.signal() }
+  semaphore.wait()
+  ```
+
+  Swift 5.10 报 `error: mutation of captured var 'result' in concurrently-executing code`。
+  正确写法是用一个加锁的引用类型把结果传出来。**本地 `./test.sh` 全绿不代表能在 CI 上编译**，
+  改完必须看 CI。
+
 ## 已知限制
 
 - 只能录系统**输出**的声音，不能单独录某个 App 的声音

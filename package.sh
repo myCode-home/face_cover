@@ -58,6 +58,19 @@ rm -f "$DMG"
 hdiutil create -volname "脸罩 $APP_NAME" \
   -srcfolder "$ROOT/dist/dmg" \
   -ov -format UDZO -quiet "$DMG"
+
+# 关键：先注销临时副本，再删目录。
+# dist/dmg 下的这份 .app 被 LaunchServices 登记过（打包时访达/系统扫到过），
+# 如果直接 rm -rf，LS 数据库里就留一条指向已删除路径的死记录。
+# 系统按 bundle id 查图标（Cmd+Tab 切换器、调度中心就是这么查的）会命中这条死记录，
+# 取不到图标文件 → 回落成通用图标；而 Dock 直接持有 /Applications 下的真实路径，所以不受影响。
+# 症状就是「Dock 里看得到 logo，Cmd+Tab 里没有」。
+LR=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+if [ -x "$LR" ]; then
+  # lsregister -u 无论路径是否存在都返回退出码 1，而本脚本开了 set -e，
+  # 必须显式吞掉，否则整条语句非零会直接中止打包（CI 上表现就是 DMG 步骤失败）。
+  "$LR" -u "$ROOT/dist/dmg/$APP_NAME.app" >/dev/null 2>&1 || true
+fi
 rm -rf "$ROOT/dist/dmg"
 
 # ---------------------------------------------------------------- 5. ZIP

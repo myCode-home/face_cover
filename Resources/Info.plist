@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleDisplayName</key>
+	<string>脸罩 FaceCover</string>
+	<key>CFBundleIconFile</key>
+	<string>FaceCover</string>
+	<key>CFBundleExecutable</key>
+	<string>FaceCover</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.local.facecover</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>FaceCover</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.video</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSCameraUsageDescription</key>
+	<string>脸罩需要打开摄像头才能录制视频，画面只保存在你自己的电脑上。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>脸罩需要麦克风才能把声音一起录进视频里。</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>本地自用工具</string>
+</dict>
+</plist>

@@ -1,0 +1,12 @@
+# 构建产物（都能用 build.sh / package.sh 重新生成）
+.build/
+dist/
+
+# macOS
+.DS_Store
+._*
+
+# Xcode（本项目不需要，但万一以后用）
+*.xcuserstate
+xcuserdata/
+DerivedData/

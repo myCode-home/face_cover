@@ -160,14 +160,11 @@ final class RecordingLibrary: ObservableObject {
 
     private static func probe(_ url: URL) -> ProbeResult {
         let asset = AVURLAsset(url: url)
-        // load(.duration) 是异步的，但这里本来就在后台串行队列上，等它一下最简单
-        let semaphore = DispatchSemaphore(value: 0)
-        var seconds: Double = 0
-        Task {
-            seconds = (try? await asset.load(.duration)).map(CMTimeGetSeconds) ?? 0
-            semaphore.signal()
-        }
-        semaphore.wait()
+        // 用同步的 asset.duration：它虽然被标记为 deprecated，但这里本来就在后台串行队列上，
+        // 读一下完全没问题。之前为了消掉这个警告改成「信号量 + Task 回填变量」，
+        // 结果在 CI 的 Swift 5.10 下报 "mutation of captured var in concurrently-executing code"。
+        // 为了一个警告引入一个真 bug 不划算，所以保持同步写法。
+        let seconds = CMTimeGetSeconds(asset.duration)
         let duration = (seconds.isFinite && seconds > 0) ? seconds : nil
 
         var thumbnail: CGImage?

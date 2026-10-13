@@ -66,7 +66,11 @@ hdiutil create -volname "脸罩 $APP_NAME" \
 # 取不到图标文件 → 回落成通用图标；而 Dock 直接持有 /Applications 下的真实路径，所以不受影响。
 # 症状就是「Dock 里看得到 logo，Cmd+Tab 里没有」。
 LR=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-[ -x "$LR" ] && "$LR" -u "$ROOT/dist/dmg/$APP_NAME.app" 2>/dev/null
+if [ -x "$LR" ]; then
+  # lsregister -u 无论路径是否存在都返回退出码 1，而本脚本开了 set -e，
+  # 必须显式吞掉，否则整条语句非零会直接中止打包（CI 上表现就是 DMG 步骤失败）。
+  "$LR" -u "$ROOT/dist/dmg/$APP_NAME.app" >/dev/null 2>&1 || true
+fi
 rm -rf "$ROOT/dist/dmg"
 
 # ---------------------------------------------------------------- 5. ZIP

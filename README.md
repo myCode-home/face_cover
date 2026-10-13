@@ -1,5 +1,7 @@
 # 脸罩 FaceCover
 
+[![自检](https://github.com/myCode-home/face_cover/actions/workflows/ci.yml/badge.svg)](https://github.com/myCode-home/face_cover/actions/workflows/ci.yml)
+
 一个 macOS 小工具：录视频的时候，用一张图片盖住自己的脸，可以连系统里正在放的音乐一起录下来，
 录完在「录像库」里统一回看。
 
@@ -121,6 +123,25 @@
 4. **音频混音**（`Tests/Mixer/`）—— PCM 格式归一化、麦克风+系统声音相加、饱和处理、时间轴连续性、收尾不丢样本。
 5. **录像库**（`Tests/Library/`）—— 真的录三段小视频丢进临时目录，验证扫描、排序、时长/大小读取、
    缩略图生成与缓存、以及删除会进废纸篓。
+
+## 开发流程
+
+`main` 分支有保护规则，**不能直接推**，改动一律走 PR：
+
+```bash
+git checkout -b fix/某个问题      # 从最新 main 开分支
+# ...改代码...
+./test.sh                        # 本地先跑自检
+git commit -am "说明"
+git push -u origin fix/某个问题
+# 然后去 GitHub 开 PR，等 CI 绿了再合并
+```
+
+CI（`.github/workflows/ci.yml`）在 macOS runner 上跑 `./package.sh`，也就是
+**生成图标 → 编译全部源码 → 82 项自检 → 出 DMG**，并把 DMG 作为构建产物上传。
+
+> 注意 `./test.sh` 只编译被测试的那几个模块，**不覆盖 `CameraEngine` / `ContentView` 这些界面和采集代码**。
+> 所以 CI 里额外跑了 `./build.sh`，不然 App 本身编译不过都发现不了。
 
 ## 代码结构
 

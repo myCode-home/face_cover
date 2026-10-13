@@ -1,0 +1,48 @@
+name: 自检
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一个分支连续推送时，取消上一次还在跑的，省时间
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: 编译 + 自检
+    runs-on: macos-14
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 工具链版本
+        run: |
+          sw_vers
+          swift --version
+
+      # package.sh 串起了：生成图标 → 编译 → 跑自检 → 出 DMG/ZIP。
+      # 这是在干净环境里唯一能同时验证「App 全部源码能编译」和「82 项自检通过」的方式。
+      - name: 生成图标 + 编译 + 自检 + 打包
+        run: ./package.sh
+
+      - name: 上传 DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: FaceCover-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 上传图标预览
+        uses: actions/upload-artifact@v4
+        with:
+          name: FaceCover-icon-preview
+          path: dist/图标预览.png
+          if-no-files-found: warn
+          retention-days: 14

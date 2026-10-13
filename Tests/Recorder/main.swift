@@ -19,16 +19,32 @@ func check(_ ok: Bool, _ label: String) {
     if !ok { failures += 1 }
 }
 
+/// 加锁的盒子，用来把 Task 里的结果传出来。
+///
+/// 不能图省事写成 `var result: T?` 然后在 Task 里回填：
+/// 本机 Swift 6.4 能过，但 CI 上的 Swift 5.10 会直接报错
+///   error: mutation of captured var 'result' in concurrently-executing code
+/// 所以用引用类型 + 锁，跨编译器版本都安全。
+final class ResultBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: T?
+
+    var value: T? {
+        get { lock.lock(); defer { lock.unlock() }; return storage }
+        set { lock.lock(); storage = newValue; lock.unlock() }
+    }
+}
+
 /// 把 async 的 AVFoundation API 拉回同步，方便顶层脚本直接写
 func awaitValue<T>(_ operation: @escaping () async throws -> T) -> T? {
     let semaphore = DispatchSemaphore(value: 0)
-    var result: T?
+    let box = ResultBox<T>()
     Task {
-        result = try? await operation()
+        box.value = try? await operation()
         semaphore.signal()
     }
     semaphore.wait()
-    return result
+    return box.value
 }
 
 let W = 1280

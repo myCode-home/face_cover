@@ -90,7 +90,7 @@ struct ContentView: View {
 
     private var indicatorColor: Color {
         if engine.isRecording { return .red }
-        if engine.overlayImage == nil { return .gray }
+        if engine.overlayImage == nil { return .secondary }
         return engine.faceVisible ? .green : .orange
     }
 
@@ -101,8 +101,8 @@ struct ContentView: View {
             let seconds = elapsed % 60
             return String(format: "录制中 %02d:%02d", minutes, seconds)
         }
-        if engine.overlayImage == nil { return "还没有脸罩" }
-        return engine.faceVisible ? "已锁定人脸" : "未检测到人脸"
+        if engine.overlayImage == nil { return "未选脸罩（录原画）" }
+        return engine.faceVisible ? "已匹配 \(engine.trackedFaceCount) 张脸" : "未检测到人脸（可继续录制）"
     }
 
     // MARK: - 侧边栏
@@ -289,6 +289,11 @@ struct ContentView: View {
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .padding(4)
+                    } else {
+                        // 素材读不到时给个占位，别让格子空着
+                        Image(systemName: "theatermasks")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.tertiary)
                     }
                 }
                 .frame(height: 56)

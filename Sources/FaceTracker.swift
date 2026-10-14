@@ -156,3 +156,118 @@ struct FaceTracker {
         size = measurement.size
     }
 }
+
+struct FaceObservation {
+    let boundingBox: CGRect
+    let roll: Double
+}
+
+struct TrackedFace {
+    let id: Int
+    let boundingBox: CGRect
+    let roll: Double
+}
+
+/// Associates Vision detections between frames and maintains one smooth tracker per person.
+/// A nil observation list means detection was skipped; an empty list means it ran and found no face.
+struct MultiFaceTracker {
+    private struct Track {
+        let id: Int
+        var tracker = FaceTracker()
+        var roll: Double = 0
+        var hasRoll = false
+        var lastSeen: Double
+    }
+
+    private var tracks: [Track] = []
+    private var nextID = 1
+    private let lostFaceGracePeriod = 0.35
+
+    /// 歪头角度的平滑增益：静止 / 移动。
+    ///
+    /// 和位置一样按速度自适应。静止时必须压得很狠 —— 脸罩比脸大（`sizeScale` 约 2.5 倍），
+    /// 外缘位移 = 半径 × 角度，一点点角度噪声就会让脸罩边缘明显摆动。
+    var rollRestGain: Double = 0.12
+    var rollMovingGain: Double = 0.35
+    private let maximumFaces = 12
+
+    mutating func reset() {
+        tracks.removeAll(keepingCapacity: true)
+        nextID = 1
+    }
+
+    mutating func update(observations: [FaceObservation]?, at time: Double) -> [TrackedFace] {
+        var matchedTrackIndices = Set<Int>()
+        var matchedObservationIndices = Set<Int>()
+
+        if let observations {
+            var candidates: [(distance: Double, trackIndex: Int, observationIndex: Int)] = []
+            for (trackIndex, track) in tracks.enumerated() {
+                guard let predicted = track.tracker.predicted else { continue }
+                for (observationIndex, observation) in observations.enumerated() {
+                    let distance = associationDistance(predicted, observation.boundingBox)
+                    if distance <= 2.5 {
+                        candidates.append((distance, trackIndex, observationIndex))
+                    }
+                }
+            }
+            candidates.sort { $0.distance < $1.distance }
+
+            for candidate in candidates {
+                guard !matchedTrackIndices.contains(candidate.trackIndex),
+                      !matchedObservationIndices.contains(candidate.observationIndex) else { continue }
+                matchedTrackIndices.insert(candidate.trackIndex)
+                matchedObservationIndices.insert(candidate.observationIndex)
+                let observation = observations[candidate.observationIndex]
+                updateTrack(at: candidate.trackIndex, observation: observation, time: time)
+            }
+
+            for index in observations.indices where !matchedObservationIndices.contains(index)
+                && tracks.count < maximumFaces {
+                var track = Track(id: nextID, lastSeen: time)
+                nextID += 1
+                track.tracker.update(measurement: observations[index].boundingBox, at: time)
+                track.roll = observations[index].roll
+                track.hasRoll = true
+                tracks.append(track)
+                matchedTrackIndices.insert(tracks.count - 1)
+            }
+        }
+
+        for index in tracks.indices where !matchedTrackIndices.contains(index) {
+            tracks[index].tracker.update(measurement: nil, at: time)
+        }
+        tracks.removeAll { time - $0.lastSeen > lostFaceGracePeriod }
+
+        return tracks.compactMap { track in
+            guard let box = track.tracker.predicted else { return nil }
+            return TrackedFace(id: track.id, boundingBox: box, roll: track.roll)
+        }
+    }
+
+    private mutating func updateTrack(at index: Int, observation: FaceObservation, time: Double) {
+        tracks[index].tracker.update(measurement: observation.boundingBox, at: time)
+        tracks[index].lastSeen = time
+        if tracks[index].hasRoll {
+            // 跟位置共用同一个「有多动」：静止时压噪声，移动时保跟手。
+            // 用固定增益的话，人不动时脸罩外缘会因为角度噪声持续摆动。
+            let motion = tracks[index].tracker.motion
+            let gain = rollRestGain + (rollMovingGain - rollRestGain) * motion
+            tracks[index].roll += (observation.roll - tracks[index].roll) * gain
+        } else {
+            tracks[index].roll = observation.roll
+            tracks[index].hasRoll = true
+        }
+    }
+
+    private func associationDistance(_ a: CGRect, _ b: CGRect) -> Double {
+        let scale = max(Double(max(a.width, a.height, b.width, b.height)), 0.04)
+        let centerDistance = hypot(Double(a.midX - b.midX), Double(a.midY - b.midY)) / scale
+        let sizeDistance = abs(log(max(Double(a.width), 0.001) / max(Double(b.width), 0.001)))
+            + abs(log(max(Double(a.height), 0.001) / max(Double(b.height), 0.001)))
+        let intersection = a.intersection(b)
+        let unionArea = a.width * a.height + b.width * b.height - max(0, intersection.width) * max(0, intersection.height)
+        let iou = unionArea > 0 ? max(0, intersection.width) * max(0, intersection.height) / unionArea : 0
+        return centerDistance + sizeDistance * 0.25 - Double(iou) * 0.5
+    }
+}

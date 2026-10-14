@@ -49,6 +49,7 @@ final class CameraEngine: NSObject, ObservableObject {
 
     @Published private(set) var isRunning = false
     @Published private(set) var isRecording = false
+    @Published private(set) var recordingStartedAt: Date?
     @Published private(set) var faceVisible = false
     @Published private(set) var lastRecordingURL: URL?
     @Published private(set) var micAvailable = false
@@ -472,6 +473,7 @@ final class CameraEngine: NSObject, ObservableObject {
             guard let w else {
                 DispatchQueue.main.async {
                     self.isRecording = false
+                    self.recordingStartedAt = nil
                     self.statusMessage = "已取消录制"
                 }
                 return
@@ -481,6 +483,7 @@ final class CameraEngine: NSObject, ObservableObject {
                 let ok = w.status == .completed
                 DispatchQueue.main.async {
                     self.isRecording = false
+                    self.recordingStartedAt = nil
                     if ok {
                         self.lastRecordingURL = url
                         self.statusMessage = "✅ 已保存 \(url?.lastPathComponent ?? "")"
@@ -536,6 +539,7 @@ final class CameraEngine: NSObject, ObservableObject {
             writerLock.unlock()
 
             DispatchQueue.main.async { [weak self] in
+                self?.recordingStartedAt = Date()
                 self?.isRecording = true
                 self?.statusMessage = "● 正在录制…"
             }

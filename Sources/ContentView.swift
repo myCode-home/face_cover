@@ -45,16 +45,18 @@ struct ContentView: View {
     }
 
     private var statusBadge: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(indicatorColor)
-                .frame(width: 8, height: 8)
-            Text(indicatorText)
-                .font(.caption)
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(indicatorColor)
+                    .frame(width: 8, height: 8)
+                Text(indicatorText(at: context.date))
+                    .font(.caption.monospacedDigit())
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.ultraThinMaterial, in: Capsule())
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(.ultraThinMaterial, in: Capsule())
     }
 
     private var indicatorColor: Color {
@@ -63,8 +65,13 @@ struct ContentView: View {
         return engine.faceVisible ? .green : .orange
     }
 
-    private var indicatorText: String {
-        if engine.isRecording { return "录制中" }
+    private func indicatorText(at now: Date) -> String {
+        if engine.isRecording, let startedAt = engine.recordingStartedAt {
+            let elapsed = max(0, Int(now.timeIntervalSince(startedAt)))
+            let minutes = elapsed / 60
+            let seconds = elapsed % 60
+            return String(format: "录制中 %02d:%02d", minutes, seconds)
+        }
         if engine.overlayImage == nil { return "还没有脸罩" }
         return engine.faceVisible ? "已锁定人脸" : "未检测到人脸"
     }

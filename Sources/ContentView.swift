@@ -76,7 +76,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("脸罩 FaceCover").font(.title3).bold()
-                    Text("选一张图盖住脸，录像直接合成，导出的视频里脸是挡住的。")
+                    Text("选择内置头套或自己的图片，特效会自动跟脸并录进视频。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -101,7 +101,41 @@ struct ContentView: View {
 
     private var imageSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("脸罩图片")
+            sectionTitle("脸罩 / 头套特效")
+
+            Button {
+                engine.usePigHeadEffect()
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "theatermasks.fill")
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("猪头头套").bold()
+                        Text("毛绒穿戴效果 · 跟随位置和歪头角度")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if engine.selectedEffect == .pigHead {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    }
+                }
+                .padding(10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background(
+                engine.selectedEffect == .pigHead
+                    ? Color.accentColor.opacity(0.16)
+                    : Color.secondary.opacity(0.08),
+                in: RoundedRectangle(cornerRadius: 9)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(engine.selectedEffect == .pigHead
+                            ? Color.accentColor : Color.clear, lineWidth: 1)
+            }
 
             HStack(spacing: 12) {
                 Group {
@@ -119,16 +153,16 @@ struct ContentView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Button("选择图片…") { chooseImage() }
+                    Button("选择自定义图片…") { chooseImage() }
                     if engine.overlayImage != nil {
-                        Button("清除") { engine.overlayImage = nil }
+                        Button("关闭特效") { engine.clearOverlay() }
                             .buttonStyle(.link)
                     }
                 }
                 Spacer()
             }
 
-            Text("建议：正方形 PNG、背景透明（比如表情包、卡通头像、贴纸）。")
+            Text("也可以用自己的正方形透明 PNG（比如表情包、卡通头像、贴纸）。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }

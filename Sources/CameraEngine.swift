@@ -6,6 +6,12 @@ import CoreMedia
 import QuartzCore
 import Vision
 
+enum FaceEffect {
+    case none
+    case pigHead
+    case custom
+}
+
 // MARK: - 预览通道
 
 /// 单独一个 ObservableObject 只承载预览帧。
@@ -28,6 +34,11 @@ private struct SettingsSnapshot {
     var showDebugBox = false
 }
 
+private struct FaceMeasurement {
+    let boundingBox: CGRect
+    let roll: Double
+}
+
 // MARK: - 引擎
 
 final class CameraEngine: NSObject, ObservableObject {
@@ -41,6 +52,7 @@ final class CameraEngine: NSObject, ObservableObject {
     @Published private(set) var faceVisible = false
     @Published private(set) var lastRecordingURL: URL?
     @Published private(set) var micAvailable = false
+    @Published private(set) var selectedEffect: FaceEffect = .none
     @Published var statusMessage = "正在请求摄像头权限…"
     @Published var cameras: [AVCaptureDevice] = []
 
@@ -92,6 +104,8 @@ final class CameraEngine: NSObject, ObservableObject {
     private var missedFrames = 0
     private var lastFaceVisible = false
     private var lastAppliedMirror = true
+    private var faceRoll: Double = 0
+    private var hasFaceRoll = false
     private var frameCounter = 0
     /// 默认每帧都检测；实测 Vision 太慢时自动降到每 2 帧一次
     private var detectEvery = 1
@@ -378,9 +392,35 @@ final class CameraEngine: NSObject, ObservableObject {
             statusMessage = "❌ 打不开这个图片文件：\(url.lastPathComponent)"
             return
         }
+        selectedEffect = .custom
         overlayImage = image
         if isRunning {
             statusMessage = "已选择「\(url.lastPathComponent)」，可以开始录制了"
+        }
+    }
+
+    /// 使用随 App 打包的猪头头套。素材保留透明通道，会跟普通脸罩一样
+    /// 自动跟随人脸，并直接合成进录制的视频。
+    func usePigHeadEffect() {
+        guard let url = Bundle.main.url(forResource: "PigHead", withExtension: "png"),
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            statusMessage = "❌ 找不到内置猪头头套素材，请重新编译或安装 App"
+            return
+        }
+
+        selectedEffect = .pigHead
+        overlayImage = image
+        if isRunning {
+            statusMessage = "已启用猪头头套特效，可以开始录制了"
+        }
+    }
+
+    func clearOverlay() {
+        selectedEffect = .none
+        overlayImage = nil
+        if isRunning {
+            statusMessage = "已关闭脸罩特效"
         }
     }
 
@@ -547,7 +587,7 @@ final class CameraEngine: NSObject, ObservableObject {
 
     // MARK: - 人脸检测
 
-    private func detectLargestFace(in pixelBuffer: CVPixelBuffer) -> CGRect? {
+    private func detectLargestFace(in pixelBuffer: CVPixelBuffer) -> FaceMeasurement? {
         let request = VNDetectFaceRectanglesRequest()
         request.revision = VNDetectFaceRectanglesRequestRevision3
 
@@ -558,9 +598,12 @@ final class CameraEngine: NSObject, ObservableObject {
             return nil
         }
 
-        return (request.results ?? []).max { a, b in
+        guard let face = (request.results ?? []).max(by: { a, b in
             a.boundingBox.width * a.boundingBox.height < b.boundingBox.width * b.boundingBox.height
-        }?.boundingBox
+        }) else { return nil }
+
+        return FaceMeasurement(boundingBox: face.boundingBox,
+                               roll: face.roll?.doubleValue ?? 0)
     }
 
     private func updateFace(in pixelBuffer: CVPixelBuffer,
@@ -569,6 +612,8 @@ final class CameraEngine: NSObject, ObservableObject {
         guard s.trackingEnabled else {
             // 关掉跟随时固定用兜底位置，让滑块手动挪
             faceTracker.reset()
+            faceRoll = 0
+            hasFaceRoll = false
             missedFrames = 0
             if lastFaceVisible {
                 lastFaceVisible = false
@@ -579,7 +624,7 @@ final class CameraEngine: NSObject, ObservableObject {
 
         // 逐帧检测。Vision 在 720p 上大约 5~10ms，33ms 的帧预算完全够。
         // 万一某台机器吃力，下面会根据实测耗时自动降到每 2 帧一次。
-        var measurement: CGRect?
+        var measurement: FaceMeasurement?
         if frameCounter % detectEvery == 0 {
             let started = CACurrentMediaTime()
             measurement = detectLargestFace(in: pixelBuffer)
@@ -595,7 +640,17 @@ final class CameraEngine: NSObject, ObservableObject {
             }
         }
 
-        faceTracker.update(measurement: measurement, at: time)
+        faceTracker.update(measurement: measurement?.boundingBox, at: time)
+
+        if let detectedRoll = measurement?.roll {
+            if hasFaceRoll {
+                // 角度比位置更容易抖，稍微压一下噪声，同时保持歪头时足够跟手。
+                faceRoll += (detectedRoll - faceRoll) * 0.35
+            } else {
+                faceRoll = detectedRoll
+                hasFaceRoll = true
+            }
+        }
 
         // 只有真正「新鲜」的检测结果才算可见
         let fresh = measurement != nil || (missedFrames > 0 && missedFrames < 3)
@@ -630,6 +685,8 @@ final class CameraEngine: NSObject, ObservableObject {
             lastAppliedMirror = s.mirror
             faceTracker.reset()
             missedFrames = 0
+            faceRoll = 0
+            hasFaceRoll = false
         }
 
         // 顺序很重要：先定画面方向 → 再在这个画面上检测人脸 → 再把脸罩贴上去。
@@ -649,7 +706,8 @@ final class CameraEngine: NSObject, ObservableObject {
                                    faceNormalized: face,
                                    sizeScale: s.sizeScale,
                                    offsetX: s.offsetX,
-                                   offsetY: s.offsetY)
+                                   offsetY: s.offsetY,
+                                   rotationRadians: faceRoll)
         }
 
         // 录制必须在画调试框之前 —— 调试框只能出现在预览里，绝不能进视频文件

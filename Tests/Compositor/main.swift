@@ -240,6 +240,21 @@ do {
     check(isGreen(pixel(buf, 130, 100)), "放大后右半绿在 x=130")
 }
 
+print("\n[G] 头套旋转 · 歪头时图片要围绕脸中心转动")
+do {
+    let buf = makeBuffer()
+    Compositor.drawOverlay(overlay: overlay, into: buf, faceNormalized: centeredFace,
+                           sizeScale: 1.0, offsetX: 0, offsetY: 0,
+                           rotationRadians: .pi / 2)
+
+    let upper = pixel(buf, 100, 85)
+    let lower = pixel(buf, 100, 115)
+    check((isRed(upper) && isGreen(lower)) || (isGreen(upper) && isRed(lower)),
+          "旋转 90° 后，原来的左右两半变成上下两半")
+    check(isBlue(pixel(buf, 75, 100)) && isBlue(pixel(buf, 125, 100)),
+          "旋转只围绕脸中心，不会横向漂移或放大")
+}
+
 print("")
 if failures == 0 {
     print("全部通过 ✅")

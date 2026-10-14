@@ -32,6 +32,11 @@ if [ -f "$ROOT/Resources/FaceCover.icns" ]; then
   cp "$ROOT/Resources/FaceCover.icns" "$APP/Contents/Resources/FaceCover.icns"
 fi
 
+if [ -f "$ROOT/Resources/PigHead.png" ]; then
+  echo "==> 拷贝内置猪头头套"
+  cp "$ROOT/Resources/PigHead.png" "$APP/Contents/Resources/PigHead.png"
+fi
+
 echo "==> ad-hoc 签名（访问摄像头/麦克风必须有签名，哪怕是临时的）"
 codesign --force --sign - --identifier "com.local.facecover" "$APP"
 codesign --verify --verbose=1 "$APP" 2>&1 | sed 's/^/    /' || true

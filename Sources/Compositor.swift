@@ -35,7 +35,8 @@ enum Compositor {
                             faceNormalized: CGRect,
                             sizeScale: Double,
                             offsetX: Double,
-                            offsetY: Double) {
+                            offsetY: Double,
+                            rotationRadians: Double = 0) {
 
         CVPixelBufferLockBaseAddress(pixelBuffer, [])
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
@@ -72,8 +73,16 @@ enum Compositor {
                             width: targetWidth,
                             height: targetHeight)
 
-        // CTM 没有翻转，图片会正着画上去，不会被左右镜像
-        ctx.draw(overlay, in: target)
+        // 围绕脸中心旋转，让头套能跟着歪头；图片本身仍不会被左右镜像。
+        // 不直接旋转整帧，否则摄像头背景也会跟着倾斜。
+        ctx.saveGState()
+        ctx.translateBy(x: target.midX, y: target.midY)
+        ctx.rotate(by: CGFloat(rotationRadians))
+        ctx.draw(overlay, in: CGRect(x: -target.width / 2,
+                                    y: -target.height / 2,
+                                    width: target.width,
+                                    height: target.height))
+        ctx.restoreGState()
     }
 
     /// 只在预览上画的调试框：把人脸框描出来。

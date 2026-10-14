@@ -31,6 +31,9 @@ private struct SettingsSnapshot {
     var mirror = true
     var recordAudio = true
     var audioSource: AudioSource = .microphone
+    var recordingResolution: RecordingResolution = .p720
+    var recordingFrameRate: RecordingFrameRate = .fps24
+    var recordingQuality: RecordingQuality = .standard
     var showDebugBox = false
 }
 
@@ -78,7 +81,53 @@ final class CameraEngine: NSObject, ObservableObject {
             applyAudioSource()
         }
     }
+    @Published var recordingResolution: RecordingResolution = CameraEngine.loadStringPreference(
+        key: "recordingResolution", as: RecordingResolution.self, default: .p720
+    ) {
+        didSet {
+            UserDefaults.standard.set(recordingResolution.rawValue, forKey: "recordingResolution")
+            syncSettings()
+            guard !isRecording else { return }
+            applyCapturePreset()
+        }
+    }
+    @Published var recordingFrameRate: RecordingFrameRate = CameraEngine.loadIntPreference(
+        key: "recordingFrameRate", as: RecordingFrameRate.self, default: .fps24
+    ) {
+        didSet {
+            UserDefaults.standard.set(recordingFrameRate.rawValue, forKey: "recordingFrameRate")
+            let targetFrameRate = recordingFrameRate.rawValue
+            syncSettings()
+            guard !isRecording else { return }
+            sessionQueue.async { [weak self] in
+                guard let self, self.isRunning else { return }
+                self.applyFrameRateLimit(to: self.currentDevice(), frameRate: targetFrameRate)
+            }
+        }
+    }
+    @Published var recordingQuality: RecordingQuality = CameraEngine.loadStringPreference(
+        key: "recordingQuality", as: RecordingQuality.self, default: .standard
+    ) {
+        didSet {
+            UserDefaults.standard.set(recordingQuality.rawValue, forKey: "recordingQuality")
+            syncSettings()
+        }
+    }
     @Published var showDebugBox = false { didSet { syncSettings() } }
+
+    private static func loadStringPreference<T: RawRepresentable>(key: String,
+                                                                   as type: T.Type,
+                                                                   default fallback: T) -> T where T.RawValue == String {
+        guard let rawValue = UserDefaults.standard.string(forKey: key) else { return fallback }
+        return T(rawValue: rawValue) ?? fallback
+    }
+
+    private static func loadIntPreference<T: RawRepresentable>(key: String,
+                                                                as type: T.Type,
+                                                                default fallback: T) -> T where T.RawValue == Int {
+        guard UserDefaults.standard.object(forKey: key) != nil else { return fallback }
+        return T(rawValue: UserDefaults.standard.integer(forKey: key)) ?? fallback
+    }
 
     // MARK: 会话管线
 
@@ -127,6 +176,7 @@ final class CameraEngine: NSObject, ObservableObject {
     private let systemAudio = SystemAudioCapture()
     private var mixedAudioFormat: CMAudioFormatDescription?
     private var audioSessionStart: CMTime?
+    private var lastAppendedVideoPTS: CMTime?
     private var lastMicrophoneNeeded = true
 
     static var outputDirectory: URL { AppPaths.recordingsDirectory }
@@ -135,6 +185,7 @@ final class CameraEngine: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        syncSettings()
         mixedAudioFormat = PCMConverter.makeFormatDescription(
             sampleRate: AudioMixer.sampleRate, channels: AudioMixer.channels
         )
@@ -161,6 +212,9 @@ final class CameraEngine: NSObject, ObservableObject {
         s.mirror = mirror
         s.recordAudio = recordAudio
         s.audioSource = audioSource
+        s.recordingResolution = recordingResolution
+        s.recordingFrameRate = recordingFrameRate
+        s.recordingQuality = recordingQuality
         s.showDebugBox = showDebugBox
         settingsLock.lock()
         settings = s
@@ -280,14 +334,53 @@ final class CameraEngine: NSObject, ObservableObject {
         return AVCaptureDevice.default(for: .video)
     }
 
+    private func applyCapturePreset() {
+        guard isRunning else { return }
+        sessionQueue.async { [weak self] in self?.configureSession() }
+    }
+
+    private func applyFrameRateLimit(to device: AVCaptureDevice?, frameRate: Int? = nil) {
+        guard let device else { return }
+        let targetFPS = frameRate ?? currentSettings().recordingFrameRate.rawValue
+        let targetRate = Double(targetFPS)
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            let format = device.activeFormat
+            guard format.videoSupportedFrameRateRanges.contains(where: {
+                      $0.minFrameRate <= targetRate && $0.maxFrameRate >= targetRate
+                  }) else {
+                writeDiagnostic("所选帧率 \(Int(targetRate))fps 不受当前摄像头/分辨率支持，使用摄像头默认帧率")
+                return
+            }
+            let duration = CMTime(value: 1, timescale: CMTimeScale(targetFPS))
+            device.activeVideoMinFrameDuration = duration
+            device.activeVideoMaxFrameDuration = duration
+        } catch {
+            writeDiagnostic("无法设置摄像头帧率：\(error.localizedDescription)")
+        }
+    }
+
     // MARK: - 会话配置
 
     private func configureSession() {
         session.beginConfiguration()
-        defer { session.commitConfiguration() }
+        defer {
+            session.commitConfiguration()
+            applyFrameRateLimit(to: currentDevice(), frameRate: currentSettings().recordingFrameRate.rawValue)
+        }
 
-        if session.canSetSessionPreset(.hd1280x720) {
-            session.sessionPreset = .hd1280x720
+        let current = currentSettings()
+        let requestedPreset = current.recordingResolution.capturePreset
+        let fallbackPresets: [AVCaptureSession.Preset] = [
+            requestedPreset,
+            .hd1920x1080,
+            .hd1280x720,
+            .vga640x480,
+            .high
+        ]
+        if let supportedPreset = fallbackPresets.first(where: { session.canSetSessionPreset($0) }) {
+            session.sessionPreset = supportedPreset
         }
 
         for input in session.inputs { session.removeInput(input) }
@@ -467,6 +560,7 @@ final class CameraEngine: NSObject, ObservableObject {
             self.audioInput = nil
             self.videoAdaptor = nil
             self.sessionStarted = false
+            self.lastAppendedVideoPTS = nil
             self.writerLock.unlock()
 
             guard let w else {
@@ -516,14 +610,17 @@ final class CameraEngine: NSObject, ObservableObject {
     private func beginWriter(width: Int, height: Int, at startPTS: CMTime) {
         let url = Self.makeOutputURL()
         let s = currentSettings()
+        let outputSize = s.recordingResolution.outputSize(sourceWidth: width, sourceHeight: height)
 
         do {
             let components = try Recorder.makeComponents(
                 url: url,
-                width: width,
-                height: height,
+                width: outputSize.width,
+                height: outputSize.height,
                 audioChannels: s.audioSource == .none ? nil : s.audioSource.outputChannels,
-                startPTS: startPTS
+                startPTS: startPTS,
+                frameRate: s.recordingFrameRate.rawValue,
+                quality: s.recordingQuality
             )
 
             writerLock.lock()
@@ -532,6 +629,7 @@ final class CameraEngine: NSObject, ObservableObject {
             audioInput = components.audioInput
             videoAdaptor = components.adaptor
             audioSessionStart = startPTS
+            lastAppendedVideoPTS = nil
             sessionStarted = true
             writerLock.unlock()
 
@@ -567,7 +665,13 @@ final class CameraEngine: NSObject, ObservableObject {
         }
     }
 
-    private func appendFrame(_ source: CVPixelBuffer, at pts: CMTime) {
+    private func appendFrame(_ source: CVPixelBuffer, at pts: CMTime, frameRate: Int) {
+        let minimumInterval = 1.0 / Double(max(frameRate, 1))
+        if let lastPTS = lastAppendedVideoPTS,
+           CMTimeGetSeconds(CMTimeSubtract(pts, lastPTS)) + 0.000_001 < minimumInterval {
+            return
+        }
+
         writerLock.lock()
         let input = videoInput
         let adaptor = videoAdaptor
@@ -581,8 +685,46 @@ final class CameraEngine: NSObject, ObservableObject {
         guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &destination) == kCVReturnSuccess,
               let destination else { return }
 
-        copyPixelBuffer(from: source, to: destination)
-        adaptor.append(destination, withPresentationTime: pts)
+        let sourceWidth = CVPixelBufferGetWidth(source)
+        let sourceHeight = CVPixelBufferGetHeight(source)
+        let outputWidth = CVPixelBufferGetWidth(destination)
+        let outputHeight = CVPixelBufferGetHeight(destination)
+        if sourceWidth == outputWidth && sourceHeight == outputHeight {
+            copyPixelBuffer(from: source, to: destination)
+        } else {
+            CVPixelBufferLockBaseAddress(destination, [])
+            defer { CVPixelBufferUnlockBaseAddress(destination, []) }
+
+            let image = CIImage(cvPixelBuffer: source)
+            let sourceAspect = Double(sourceWidth) / Double(sourceHeight)
+            let outputAspect = Double(outputWidth) / Double(outputHeight)
+            let cropped: CIImage
+            if sourceAspect > outputAspect {
+                let cropWidth = CGFloat(sourceHeight) * CGFloat(outputAspect)
+                cropped = image.cropped(to: CGRect(x: image.extent.midX - cropWidth / 2,
+                                                   y: image.extent.minY,
+                                                   width: cropWidth,
+                                                   height: image.extent.height))
+            } else {
+                let cropHeight = CGFloat(sourceWidth) / CGFloat(outputAspect)
+                cropped = image.cropped(to: CGRect(x: image.extent.minX,
+                                                   y: image.extent.midY - cropHeight / 2,
+                                                   width: image.extent.width,
+                                                   height: cropHeight))
+            }
+            let sx = CGFloat(outputWidth) / cropped.extent.width
+            let sy = CGFloat(outputHeight) / cropped.extent.height
+            let scaled = cropped.transformed(by: CGAffineTransform(translationX: -cropped.extent.minX,
+                                                                   y: -cropped.extent.minY))
+                .transformed(by: CGAffineTransform(scaleX: sx, y: sy))
+            let bounds = CGRect(x: 0, y: 0, width: outputWidth, height: outputHeight)
+            ciContext.render(scaled, to: destination, bounds: bounds,
+                             colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        }
+
+        if adaptor.append(destination, withPresentationTime: pts) {
+            lastAppendedVideoPTS = pts
+        }
     }
 
     // MARK: - 人脸检测
@@ -721,7 +863,7 @@ final class CameraEngine: NSObject, ObservableObject {
                             height: CVPixelBufferGetHeight(pixelBuffer),
                             at: pts)
             }
-            appendFrame(pixelBuffer, at: pts)
+            appendFrame(pixelBuffer, at: pts, frameRate: s.recordingFrameRate.rawValue)
         }
 
         // 调试框只画在预览上，不参与录制

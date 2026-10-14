@@ -207,6 +207,31 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             sectionTitle("录制")
 
+            Picker("分辨率", selection: $engine.recordingResolution) {
+                ForEach(RecordingResolution.allCases) { option in
+                    Text(option.title).tag(option)
+                }
+            }
+            .disabled(engine.isRecording)
+
+            Picker("帧率", selection: $engine.recordingFrameRate) {
+                ForEach(RecordingFrameRate.allCases) { option in
+                    Text(option.title).tag(option)
+                }
+            }
+            .disabled(engine.isRecording)
+
+            Picker("画质", selection: $engine.recordingQuality) {
+                ForEach(RecordingQuality.allCases) { option in
+                    Text(option.title).tag(option)
+                }
+            }
+            .disabled(engine.isRecording)
+
+            Text("约 \(estimatedStorageText) MB/分钟（估算）· 设置会记住，录制中不可修改")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
             Picker("声音来源", selection: $engine.audioSource) {
                 ForEach(AudioSource.allCases) { source in
                     Text(source.label).tag(source)
@@ -268,6 +293,18 @@ struct ContentView: View {
             }
             .font(.caption)
         }
+    }
+
+    private var estimatedStorageText: String {
+        let size = engine.recordingResolution.nominalOutputSize
+        let bitsPerSecond = engine.recordingQuality.averageBitRate(
+            width: size.width,
+            height: size.height,
+            frameRate: engine.recordingFrameRate.rawValue
+        )
+        // 视频码率折算到每分钟 MB，音频额外占用约 1 MB/分钟。
+        let megabytes = Double(bitsPerSecond) * 60 / 8 / 1_000_000 + 1
+        return String(format: "%.0f", megabytes)
     }
 
     private var cameraSection: some View {

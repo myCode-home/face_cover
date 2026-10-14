@@ -32,17 +32,6 @@ struct ContentView: View {
                 engine.loadOverlayImage(from: url)
             }
 
-            if engine.overlayImage == nil {
-                VStack(spacing: 12) {
-                    Image(systemName: "photo.badge.plus")
-                        .font(.system(size: 44))
-                    Text("把图片拖到这里，或者点右边的「选择图片」")
-                        .font(.callout)
-                }
-                .foregroundStyle(.white.opacity(0.6))
-                .allowsHitTesting(false)
-            }
-
             VStack {
                 HStack {
                     statusBadge

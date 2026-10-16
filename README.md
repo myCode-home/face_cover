@@ -12,7 +12,7 @@
 
 ## 装 / 跑
 
-**普通使用**：双击 `dist/FaceCover-0.2.0.dmg`，把「脸罩 FaceCover」拖进「应用程序」。
+**普通使用**：双击 `dist/FaceCover-<版本>.dmg`，把「脸罩 FaceCover」拖进「应用程序」。
 （已经装好了：`/Applications/FaceCover.app`）
 
 **自己改代码**：
@@ -27,12 +27,13 @@
 
 ### 分发
 
-`./package.sh` 会产出两个文件：
+`./package.sh` 会产出两个文件（版本号取自 `Resources/Info.plist` 的
+`CFBundleShortVersionString`，发版前记得改）：
 
 | 文件 | 用途 |
 |---|---|
-| `dist/FaceCover-0.2.0.dmg` | 双击挂载，拖进「应用程序」 |
-| `dist/FaceCover-0.2.0.zip` | 发给别人 |
+| `dist/FaceCover-<版本>.dmg` | 双击挂载，拖进「应用程序」 |
+| `dist/FaceCover-<版本>.zip` | 发给别人 |
 
 > ⚠️ 这个 App 是**本地 ad-hoc 签名**的。在你自己这台机器上直接能用；
 > 但如果通过微信/网盘发给别人，对方 macOS 会拦下来说「无法验证开发者」。

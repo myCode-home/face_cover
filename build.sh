@@ -32,10 +32,16 @@ if [ -f "$ROOT/Resources/FaceCover.icns" ]; then
   cp "$ROOT/Resources/FaceCover.icns" "$APP/Contents/Resources/FaceCover.icns"
 fi
 
-if [ -f "$ROOT/Resources/PigHead.png" ]; then
-  echo "==> 拷贝内置猪头头套"
-  cp "$ROOT/Resources/PigHead.png" "$APP/Contents/Resources/PigHead.png"
-fi
+# 内置头套素材。文件名必须是 Cover-*.png，且 id 要和 Sources/HeadCover.swift 里对得上。
+# 素材都经过 Tools/CoverNormalizer 归一化（脸洞开口等宽、居中），换新素材前请先跑一遍那个工具。
+echo "==> 拷贝内置头套素材"
+COVER_COUNT=0
+for cover in "$ROOT"/Resources/Cover-*.png; do
+  [ -e "$cover" ] || continue
+  cp "$cover" "$APP/Contents/Resources/"
+  COVER_COUNT=$((COVER_COUNT + 1))
+done
+echo "    共 $COVER_COUNT 款"
 
 echo "==> ad-hoc 签名（访问摄像头/麦克风必须有签名，哪怕是临时的）"
 codesign --force --sign - --identifier "com.local.facecover" "$APP"

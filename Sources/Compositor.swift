@@ -27,6 +27,32 @@ enum Compositor {
         flipHorizontally(pixelBuffer)
     }
 
+    /// 算出脸罩应该画在哪（像素坐标，左下角原点）。
+    ///
+    /// `drawOverlay` 和调试框都走这一个函数 —— 否则「画出来的框」和「实际贴的图」
+    /// 可能因为两边各算一遍而慢慢分岔，调试框就失去意义了。
+    static func overlayTargetRect(overlay: CGImage,
+                                  faceNormalized: CGRect,
+                                  frameWidth: CGFloat,
+                                  frameHeight: CGFloat,
+                                  sizeScale: Double,
+                                  offsetX: Double,
+                                  offsetY: Double) -> CGRect {
+        let face = CGRect(x: faceNormalized.minX * frameWidth,
+                          y: faceNormalized.minY * frameHeight,
+                          width: faceNormalized.width * frameWidth,
+                          height: faceNormalized.height * frameHeight)
+
+        let targetWidth = face.width * CGFloat(sizeScale)
+        let targetHeight = targetWidth * CGFloat(overlay.height) / CGFloat(max(overlay.width, 1))
+
+        // offsetY 为正值时图片向下移
+        return CGRect(x: face.midX - targetWidth / 2 + CGFloat(offsetX) * face.width,
+                      y: face.midY - targetHeight / 2 - CGFloat(offsetY) * face.height,
+                      width: targetWidth,
+                      height: targetHeight)
+    }
+
     /// 把脸罩图片画到画面上。
     ///
     /// `faceNormalized` 必须是 **在这一帧最终方向下** 检测出来的人脸框。
@@ -56,22 +82,13 @@ enum Compositor {
                                             | CGBitmapInfo.byteOrder32Little.rawValue)
         else { return }
 
-        let frameWidth = CGFloat(width)
-        let frameHeight = CGFloat(height)
-
-        let face = CGRect(x: faceNormalized.minX * frameWidth,
-                          y: faceNormalized.minY * frameHeight,
-                          width: faceNormalized.width * frameWidth,
-                          height: faceNormalized.height * frameHeight)
-
-        let targetWidth = face.width * CGFloat(sizeScale)
-        let targetHeight = targetWidth * CGFloat(overlay.height) / CGFloat(max(overlay.width, 1))
-
-        // offsetY 为正值时图片向下移
-        let target = CGRect(x: face.midX - targetWidth / 2 + CGFloat(offsetX) * face.width,
-                            y: face.midY - targetHeight / 2 - CGFloat(offsetY) * face.height,
-                            width: targetWidth,
-                            height: targetHeight)
+        let target = overlayTargetRect(overlay: overlay,
+                                       faceNormalized: faceNormalized,
+                                       frameWidth: CGFloat(width),
+                                       frameHeight: CGFloat(height),
+                                       sizeScale: sizeScale,
+                                       offsetX: offsetX,
+                                       offsetY: offsetY)
 
         // 围绕脸中心旋转，让头套能跟着歪头；图片本身仍不会被左右镜像。
         // 不直接旋转整帧，否则摄像头背景也会跟着倾斜。
@@ -85,15 +102,56 @@ enum Compositor {
         ctx.restoreGState()
     }
 
-    /// 只在预览上画的调试框：把人脸框描出来。
-    /// 用来一眼判断「遮罩有没有落在脸上」。**绝不能画进录制的画面**，
-    /// 所以调用点必须在写文件之后。
-    static func drawDebugBox(into pixelBuffer: CVPixelBuffer, faceNormalized: CGRect) {
+    /// 脸罩素材里「脸应该露出来的那块」相对素材画布的比例。
+    ///
+    /// 由 `CoverGeometry.measure` 在素材载入时量一次得到。
+    /// 有了它，预览上就能把开口画出来 —— 「脸有没有落在开口里」一眼可见，
+    /// 不用再靠感觉判断是没对准、还是本来就该这样。
+    ///
+    /// 注意 y 的方向：这里用的是 `CoverGeometry` 量出来的坐标系，**自素材顶部向下**，
+    /// 和直觉相反。不要按「向上为正」去理解它 —— `rect(in:)` 会把它正确映射到画面，
+    /// `Tests/Compositor` 的 [H] 段有像素级断言专门盯着这个方向没搞反。
+    struct OpeningGuide: Equatable {
+        /// 开口宽 / 素材画布宽
+        let widthFraction: Double
+        /// 开口高 / 素材画布**宽**（用宽做基准，这样和贴图的宽度缩放是同一个尺度）
+        let heightFraction: Double
+        /// 开口中心相对素材画布中心的偏移，按画布宽归一化
+        let offsetX: Double
+        let offsetY: Double
+
+        /// 开口落在画面上的实际矩形
+        func rect(in target: CGRect) -> CGRect {
+            let w = CGFloat(widthFraction) * target.width
+            let h = CGFloat(heightFraction) * target.width
+            let cx = target.midX + CGFloat(offsetX) * target.width
+            let cy = target.midY + CGFloat(offsetY) * target.width
+            return CGRect(x: cx - w / 2, y: cy - h / 2, width: w, height: h)
+        }
+    }
+
+    /// 只在预览上画的调试框。
+    ///
+    /// 画三样东西：
+    /// - **绿框**：Vision 检测到的人脸框（贴图就是按它的中心和宽度算的）
+    /// - **品红框**：脸罩实际占的画面范围
+    /// - **青框**：脸罩素材里的面孔开口 —— 脸应该正好落在这里面
+    ///
+    /// **绝不能画进录制的画面**，所以调用点必须在写文件之后。
+    static func drawDebugBox(into pixelBuffer: CVPixelBuffer,
+                             faceNormalized: CGRect,
+                             overlay: CGImage?,
+                             opening: OpeningGuide?,
+                             sizeScale: Double,
+                             offsetX: Double,
+                             offsetY: Double) {
         CVPixelBufferLockBaseAddress(pixelBuffer, [])
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
 
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
+        let frameWidth = CGFloat(width)
+        let frameHeight = CGFloat(height)
 
         guard let base = CVPixelBufferGetBaseAddress(pixelBuffer),
               let ctx = CGContext(data: base,
@@ -106,24 +164,51 @@ enum Compositor {
                                             | CGBitmapInfo.byteOrder32Little.rawValue)
         else { return }
 
-        let frameWidth = CGFloat(width)
-        let frameHeight = CGFloat(height)
+        let lineWidth = max(2, frameWidth / 320)
+
+        // 1. 人脸框
         let rect = CGRect(x: faceNormalized.minX * frameWidth,
                           y: faceNormalized.minY * frameHeight,
                           width: faceNormalized.width * frameWidth,
                           height: faceNormalized.height * frameHeight)
-        let lineWidth = max(2, frameWidth / 320)
 
         ctx.setStrokeColor(CGColor(colorSpace: colorSpace, components: [0, 1, 0.4, 1])!)
         ctx.setLineWidth(lineWidth)
         ctx.stroke(rect)
 
         // 十字准星标出中心，方便判断有没有整体偏移
-        ctx.setLineWidth(lineWidth)
         ctx.move(to: CGPoint(x: rect.midX - lineWidth * 4, y: rect.midY))
         ctx.addLine(to: CGPoint(x: rect.midX + lineWidth * 4, y: rect.midY))
         ctx.move(to: CGPoint(x: rect.midX, y: rect.midY - lineWidth * 4))
         ctx.addLine(to: CGPoint(x: rect.midX, y: rect.midY + lineWidth * 4))
+        ctx.strokePath()
+
+        guard let overlay else { return }
+
+        // 2. 脸罩实际范围
+        let target = overlayTargetRect(overlay: overlay,
+                                       faceNormalized: faceNormalized,
+                                       frameWidth: frameWidth,
+                                       frameHeight: frameHeight,
+                                       sizeScale: sizeScale,
+                                       offsetX: offsetX,
+                                       offsetY: offsetY)
+        ctx.setStrokeColor(CGColor(colorSpace: colorSpace, components: [1, 0.25, 0.85, 1])!)
+        ctx.setLineWidth(lineWidth)
+        ctx.stroke(target)
+
+        // 3. 面孔开口 —— 脸应该正好露在这块里面
+        guard let opening else { return }
+        let openingRect = opening.rect(in: target)
+        ctx.setStrokeColor(CGColor(colorSpace: colorSpace, components: [0.25, 0.85, 1, 1])!)
+        ctx.setLineWidth(lineWidth)
+        ctx.stroke(openingRect)
+
+        // 开口中心到人脸中心的连线，一眼看出差多少
+        ctx.setStrokeColor(CGColor(colorSpace: colorSpace, components: [0.25, 0.85, 1, 0.6])!)
+        ctx.setLineWidth(max(1, lineWidth / 2))
+        ctx.move(to: CGPoint(x: rect.midX, y: rect.midY))
+        ctx.addLine(to: CGPoint(x: openingRect.midX, y: openingRect.midY))
         ctx.strokePath()
     }
 

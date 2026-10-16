@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
 # 无头自检（不需要摄像头、不需要任何权限）：
-#   1. 合成逻辑   —— 坐标、缩放、偏移、镜像（含「遮罩和脸反向移动」的回归）
+#   1. 合成逻辑   —— 坐标、缩放、偏移、镜像，含「遮罩和脸反向移动」的回归，以及「调试框开口 = 脸露出来的位置」
 #   2. 录制管线   —— 真的录出 .mov 再解回来逐像素验证
-#   3. 人脸跟踪   —— 相位延迟与抗抖
+#   3. 人脸跟踪   —— 相位延迟与抗抖（正弦摆动 + 带随机噪声的静止人脸）
 #   4. 音频混音   —— PCM 格式归一化、麦克风+系统声音混音、饱和、时间轴
 #   5. 录像库     —— 扫描、排序、时长/大小、缩略图、删除
+#   6. 脸罩素材   —— 目录一致性与几何规格（锚点占比、居中、不被裁切）
 #
 set -euo pipefail
 
@@ -26,7 +27,8 @@ run() {
 }
 
 run "1/5  合成逻辑" CompositorCheck \
-  "$ROOT/Sources/Compositor.swift" "$ROOT/Tests/Compositor/main.swift"
+  "$ROOT/Sources/Compositor.swift" "$ROOT/Sources/CoverGeometry.swift" \
+  "$ROOT/Sources/HeadCover.swift" "$ROOT/Tests/Compositor/main.swift"
 
 run "2/5  录制管线（端到端）" RecorderCheck \
   "$ROOT/Sources/Compositor.swift" "$ROOT/Sources/Recorder.swift" \
@@ -39,10 +41,14 @@ run "4/5  音频混音" MixerCheck \
   "$ROOT/Sources/AudioSource.swift" "$ROOT/Sources/AudioMixer.swift" \
   "$ROOT/Tests/Mixer/main.swift"
 
-run "5/5  录像库" LibraryCheck \
+run "5/6  录像库" LibraryCheck \
   "$ROOT/Sources/AppPaths.swift" "$ROOT/Sources/Compositor.swift" \
   "$ROOT/Sources/Recorder.swift" "$ROOT/Sources/RecordingLibrary.swift" \
   "$ROOT/Tests/Library/main.swift"
+
+run "6/6  脸罩素材规格" CoverCheck \
+  "$ROOT/Sources/CoverGeometry.swift" "$ROOT/Sources/HeadCover.swift" \
+  "$ROOT/Tests/Cover/main.swift"
 
 echo
 if [ "$STATUS" -eq 0 ]; then

@@ -10,3 +10,6 @@ dist/
 *.xcuserstate
 xcuserdata/
 DerivedData/
+
+# 本地工作笔记（项目级记忆 / 临时分析产物，不属于代码）
+.workbuddy-ai/

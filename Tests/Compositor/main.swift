@@ -1,6 +1,8 @@
 import CoreGraphics
 import CoreVideo
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 // 无头自检：验证「脸罩合成」的坐标、缩放、偏移、镜像行为。
 // 运行: ./test.sh
@@ -253,6 +255,121 @@ do {
           "旋转 90° 后，原来的左右两半变成上下两半")
     check(isBlue(pixel(buf, 75, 100)) && isBlue(pixel(buf, 125, 100)),
           "旋转只围绕脸中心，不会横向漂移或放大")
+}
+
+print("\n[H] 调试框画出的「开口」必须就是脸露出来的位置")
+do {
+    // H1. 造一张「透明洞故意偏离中心」的素材。
+    // 洞偏上 → offsetY 必须为正，而且画出来的开口框要真的落在洞上。
+    // 这一条专门防「开口画反了」—— 画反的调试框比没有调试框更害人。
+    let canvas = 400
+    // 洞必须**包含画布中心**（CoverGeometry 从中心起洪水填充），所以半径给大一点、
+    // 中心只往上偏 50px —— 这样既能被量出来，offsetY 又明显不为 0。
+    let holeCenter = CGPoint(x: 200.0, y: 250.0)
+    let holeRadius: CGFloat = 90
+    let art = CGContext(data: nil, width: canvas, height: canvas, bitsPerComponent: 8,
+                        bytesPerRow: 0, space: srgb,
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    art.setFillColor(color(1, 0, 0))
+    art.fill(CGRect(x: 0, y: 0, width: CGFloat(canvas), height: CGFloat(canvas)))
+    art.setBlendMode(.clear)
+    art.fillEllipse(in: CGRect(x: holeCenter.x - holeRadius, y: holeCenter.y - holeRadius,
+                               width: holeRadius * 2, height: holeRadius * 2))
+    art.setBlendMode(.normal)
+    let artImage = art.makeImage()!
+
+    // CoverGeometry 按文件路径工作，所以先落盘
+    let temp = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("facecover-opening-\(UUID().uuidString).png")
+    defer { try? FileManager.default.removeItem(at: temp) }
+    if let dest = CGImageDestinationCreateWithURL(temp as CFURL,
+                                                  UTType.png.identifier as CFString, 1, nil) {
+        CGImageDestinationAddImage(dest, artImage, nil)
+        CGImageDestinationFinalize(dest)
+    }
+
+    if let measured = CoverGeometry.measure(path: temp.path) {
+        let size = Double(measured.canvasSize)
+        let guide = Compositor.OpeningGuide(
+            widthFraction: Double(measured.openingWidth) / size,
+            heightFraction: Double(measured.openingHeight) / size,
+            offsetX: (Double(measured.center.x) - size / 2) / size,
+            offsetY: (Double(measured.center.y) - size / 2) / size)
+
+        // 只断言「明显偏离中心」；方向对不对由下面两条像素断言负责，
+        // 那才是真正的判据 —— 符号约定本身不值得写死。
+        check(abs(guide.offsetY) > 0.1,
+              "洞偏离中心 → offsetY 明显不为 0（实测 \(String(format: "%.3f", guide.offsetY))）")
+
+        let face = CGRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)
+        let buf = makeBuffer()
+        Compositor.drawOverlay(overlay: artImage, into: buf, faceNormalized: face,
+                               sizeScale: 1.0, offsetX: 0, offsetY: 0)
+        let target = Compositor.overlayTargetRect(overlay: artImage, faceNormalized: face,
+                                                  frameWidth: CGFloat(W), frameHeight: CGFloat(H),
+                                                  sizeScale: 1.0, offsetX: 0, offsetY: 0)
+        let openingRect = guide.rect(in: target)
+
+        check(isBlue(pixel(buf, Int(openingRect.midX), Int(openingRect.midY))),
+              "开口框中心确实是透的（透出背景）")
+        check(!isBlue(pixel(buf, Int(openingRect.midX), Int(openingRect.minY - 5))),
+              "开口框正下方是实心 —— 洞确实偏上，没有画反")
+    } else {
+        check(false, "量不出合成素材的开口")
+    }
+
+    // H2. 逐款真实素材：guide 算出来的锚点，必须就是「脸露出来 / 被盖住」的那块。
+    // 这一条比任何坐标推导都硬 —— 它同时验证了归一化、measure、rect() 和 drawOverlay 四处的方向约定。
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+
+    for cover in HeadCover.all {
+        let path = root.appendingPathComponent("Resources/\(cover.id).png").path
+        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+            check(false, "\(cover.name)：读不到素材"); continue
+        }
+
+        let measured = cover.kind == .hood
+            ? CoverGeometry.measure(path: path)
+            : CoverGeometry.measureMask(path: path)
+        guard let measured, measured.canvasSize > 0 else {
+            check(false, "\(cover.name)：量不出锚点"); continue
+        }
+        let size = Double(measured.canvasSize)
+        let guide = Compositor.OpeningGuide(
+            widthFraction: Double(measured.openingWidth) / size,
+            heightFraction: Double(measured.openingHeight) / size,
+            offsetX: (Double(measured.center.x) - size / 2) / size,
+            offsetY: (Double(measured.center.y) - size / 2) / size)
+
+        // 人脸框只占画面中间一小块，否则 sizeScale 2.47 会把脸罩推出缓冲区
+        let face = CGRect(x: 0.375, y: 0.375, width: 0.25, height: 0.25)
+        let scale = CoverDefaults.defaultSizeScale(for: cover.kind)
+        let buf = makeBuffer()
+        Compositor.drawOverlay(overlay: img, into: buf, faceNormalized: face,
+                               sizeScale: scale, offsetX: 0, offsetY: 0)
+        let target = Compositor.overlayTargetRect(overlay: img, faceNormalized: face,
+                                                  frameWidth: CGFloat(W), frameHeight: CGFloat(H),
+                                                  sizeScale: scale, offsetX: 0, offsetY: 0)
+        let anchor = guide.rect(in: target)
+
+        switch cover.kind {
+        case .hood:
+            // 头套：锚点中心应该透出背景（脸从开口里露出来）
+            check(isBlue(pixel(buf, Int(anchor.midX), Int(anchor.midY))),
+                  "\(cover.name)：开口中心透出背景")
+            // 锚点外侧一点应该是实心的（环有厚度）
+            check(!isBlue(pixel(buf, Int(anchor.minX - 6), Int(target.midY))),
+                  "\(cover.name)：开口左侧是实心")
+        case .mask:
+            // 整脸覆盖：锚点（= 整个头）中心应该被盖住，外侧才是背景
+            check(!isBlue(pixel(buf, Int(anchor.midX), Int(anchor.midY))),
+                  "\(cover.name)：锚点中心被盖住")
+            check(isBlue(pixel(buf, Int(target.minX - 12), Int(target.midY))),
+                  "\(cover.name)：脸罩范围之外是背景")
+        }
+    }
 }
 
 print("")

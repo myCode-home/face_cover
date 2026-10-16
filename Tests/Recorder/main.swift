@@ -54,6 +54,29 @@ let FRAME_COUNT = 60
 
 let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
 
+print("\n[0] 录制质量选项")
+let size480 = RecordingResolution.p480.outputSize(sourceWidth: 1280, sourceHeight: 720)
+let size720 = RecordingResolution.p720.outputSize(sourceWidth: 1280, sourceHeight: 720)
+let size1080 = RecordingResolution.p1080.outputSize(sourceWidth: 1280, sourceHeight: 720)
+check(size480.width == 854 && size480.height == 480, "480p 保持 16:9（\(size480.width)×\(size480.height)）")
+check(size720.width == 1280 && size720.height == 720, "720p 保留原始采集尺寸")
+check(size1080.width == 1280 && size1080.height == 720, "摄像头低于 1080p 时不做无意义放大")
+let portrait480 = RecordingResolution.p480.outputSize(sourceWidth: 720, sourceHeight: 1280)
+check(portrait480.width == 480 && portrait480.height == 854, "竖屏 480p 按短边目标并保持方向")
+let fourThree480 = RecordingResolution.p480.outputSize(sourceWidth: 640, sourceHeight: 480)
+check(fourThree480.width == 640 && fourThree480.height == 480, "4:3 源画面低于目标时不放大")
+check(RecordingResolution.p480.nominalOutputSize.width == 854 && RecordingResolution.p480.nominalOutputSize.height == 480,
+      "480p 标准输出尺寸为 854×480")
+check(RecordingResolution.p1080.nominalOutputSize.width == 1920 && RecordingResolution.p1080.nominalOutputSize.height == 1080,
+      "1080p 标准输出尺寸为 1920×1080")
+let compactRate = RecordingQuality.compact.averageBitRate(width: 1280, height: 720, frameRate: 30)
+let standardRate = RecordingQuality.standard.averageBitRate(width: 1280, height: 720, frameRate: 30)
+let highRate = RecordingQuality.high.averageBitRate(width: 1280, height: 720, frameRate: 30)
+check(compactRate < standardRate && standardRate < highRate,
+      "码率随画质档递增（\(compactRate / 1_000_000)/\(standardRate / 1_000_000)/\(highRate / 1_000_000) Mbps）")
+let lowFPSRate = RecordingQuality.standard.averageBitRate(width: 1280, height: 720, frameRate: 15)
+check(lowFPSRate < standardRate, "15fps 的目标码率低于 30fps")
+
 func color(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> CGColor {
     CGColor(colorSpace: srgb, components: [r, g, b, 1])!
 }

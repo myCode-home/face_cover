@@ -6,10 +6,17 @@ import CoreMedia
 import QuartzCore
 import Vision
 
-enum FaceEffect {
+/// 当前贴的是什么。
+/// 内置头套用 `HeadCover.id` 表示，这样加一款新头套不用改这个枚举。
+enum FaceEffect: Equatable {
     case none
-    case pigHead
+    case cover(String)
     case custom
+
+    var coverID: String? {
+        if case .cover(let id) = self { return id }
+        return nil
+    }
 }
 
 // MARK: - 预览通道
@@ -25,12 +32,15 @@ final class PreviewSink: ObservableObject {
 private struct SettingsSnapshot {
     var image: CGImage?
     var trackingEnabled = true
-    var sizeScale: Double = 1.8
+    var sizeScale: Double = CoverDefaults.sizeScale
     var offsetX: Double = 0
     var offsetY: Double = 0
     var mirror = true
     var recordAudio = true
     var audioSource: AudioSource = .microphone
+    var recordingResolution: RecordingResolution = .p720
+    var recordingFrameRate: RecordingFrameRate = .fps24
+    var recordingQuality: RecordingQuality = .standard
     var showDebugBox = false
 }
 
@@ -49,6 +59,7 @@ final class CameraEngine: NSObject, ObservableObject {
 
     @Published private(set) var isRunning = false
     @Published private(set) var isRecording = false
+    @Published private(set) var recordingStartedAt: Date?
     @Published private(set) var faceVisible = false
     @Published private(set) var lastRecordingURL: URL?
     @Published private(set) var micAvailable = false
@@ -67,7 +78,7 @@ final class CameraEngine: NSObject, ObservableObject {
 
     @Published var overlayImage: CGImage? { didSet { syncSettings() } }
     @Published var trackingEnabled = true { didSet { syncSettings() } }
-    @Published var sizeScale: Double = 1.8 { didSet { syncSettings() } }
+    @Published var sizeScale: Double = CoverDefaults.sizeScale { didSet { syncSettings() } }
     @Published var offsetX: Double = 0 { didSet { syncSettings() } }
     @Published var offsetY: Double = 0 { didSet { syncSettings() } }
     @Published var mirror = true { didSet { syncSettings() } }
@@ -78,6 +89,61 @@ final class CameraEngine: NSObject, ObservableObject {
             applyAudioSource()
         }
     }
+
+    // MARK: 录制质量（分辨率 / 帧率 / 画质）
+    //
+    // 三项都会存进 UserDefaults，重启后还是上次的选择。
+    // 录制中锁定：AVCaptureSession 的预设和摄像头帧率中途改不了，强行改会让画面跳一下。
+
+    @Published var recordingResolution: RecordingResolution = CameraEngine.loadStringPreference(
+        key: "recordingResolution", as: RecordingResolution.self, default: .p720
+    ) {
+        didSet {
+            UserDefaults.standard.set(recordingResolution.rawValue, forKey: "recordingResolution")
+            syncSettings()
+            guard !isRecording else { return }
+            applyCapturePreset()
+        }
+    }
+
+    @Published var recordingFrameRate: RecordingFrameRate = CameraEngine.loadIntPreference(
+        key: "recordingFrameRate", as: RecordingFrameRate.self, default: .fps24
+    ) {
+        didSet {
+            UserDefaults.standard.set(recordingFrameRate.rawValue, forKey: "recordingFrameRate")
+            let targetFrameRate = recordingFrameRate.rawValue
+            syncSettings()
+            guard !isRecording else { return }
+            sessionQueue.async { [weak self] in
+                guard let self, self.isRunning else { return }
+                self.applyFrameRateLimit(to: self.currentDevice(), frameRate: targetFrameRate)
+            }
+        }
+    }
+
+    @Published var recordingQuality: RecordingQuality = CameraEngine.loadStringPreference(
+        key: "recordingQuality", as: RecordingQuality.self, default: .standard
+    ) {
+        didSet {
+            UserDefaults.standard.set(recordingQuality.rawValue, forKey: "recordingQuality")
+            syncSettings()
+        }
+    }
+
+    private static func loadStringPreference<T: RawRepresentable>(key: String,
+                                                                   as type: T.Type,
+                                                                   default fallback: T) -> T where T.RawValue == String {
+        guard let rawValue = UserDefaults.standard.string(forKey: key) else { return fallback }
+        return T(rawValue: rawValue) ?? fallback
+    }
+
+    private static func loadIntPreference<T: RawRepresentable>(key: String,
+                                                               as type: T.Type,
+                                                               default fallback: T) -> T where T.RawValue == Int {
+        guard UserDefaults.standard.object(forKey: key) != nil else { return fallback }
+        return T(rawValue: UserDefaults.standard.integer(forKey: key)) ?? fallback
+    }
+
     @Published var showDebugBox = false { didSet { syncSettings() } }
 
     // MARK: 会话管线
@@ -104,13 +170,30 @@ final class CameraEngine: NSObject, ObservableObject {
     private var missedFrames = 0
     private var lastFaceVisible = false
     private var lastAppliedMirror = true
+    /// 当前脸罩素材的面孔开口几何，载入时量一次。自定义图片没有开口，这里是 nil。
+    /// 只用于预览上的调试框 —— 让「脸有没有落在开口里」一眼可见。
+    private var overlayOpening: Compositor.OpeningGuide?
     private var faceRoll: Double = 0
     private var hasFaceRoll = false
     private var frameCounter = 0
     /// 默认每帧都检测；实测 Vision 太慢时自动降到每 2 帧一次
     private var detectEvery = 1
     private var visionCost: Double?
+    /// 迟滞用的连续计数，见 `updateDetectionCadence()`
+    private var slowStreak = 0
+    private var fastStreak = 0
     private var lastFaceLogTime: Double = 0
+
+    /// 单帧检测耗时超过这个值就考虑降到每 2 帧一次
+    private static let slowCostThreshold = 0.020
+    /// 低于这个值才考虑恢复逐帧。和上面留出间隔，避免在阈值附近来回翻
+    private static let fastCostThreshold = 0.010
+    private static let slowStreakFrames = 20
+    private static let fastStreakFrames = 60
+
+    /// 歪头角度的平滑增益：静止 / 移动
+    private static let rollRestGain = 0.12
+    private static let rollMovingGain = 0.35
 
     // MARK: 录制
 
@@ -121,6 +204,8 @@ final class CameraEngine: NSObject, ObservableObject {
     private var audioInput: AVAssetWriterInput?
     private var videoAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var sessionStarted = false
+    /// 上一帧真正写进文件的时间戳。抽帧（按目标帧率丢掉多余帧）要用它算间隔
+    private var lastAppendedVideoPTS: CMTime?
 
     // 音频
     private let mixer = AudioMixer()
@@ -135,6 +220,9 @@ final class CameraEngine: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        // 先把三个录制质量属性的初始值写进快照。它们是带 didSet 的 @Published，
+        // 初始化时不会触发 didSet，不主动同步一次的话第一段录像是默认档而不是用户上次选的。
+        syncSettings()
         mixedAudioFormat = PCMConverter.makeFormatDescription(
             sampleRate: AudioMixer.sampleRate, channels: AudioMixer.channels
         )
@@ -161,6 +249,9 @@ final class CameraEngine: NSObject, ObservableObject {
         s.mirror = mirror
         s.recordAudio = recordAudio
         s.audioSource = audioSource
+        s.recordingResolution = recordingResolution
+        s.recordingFrameRate = recordingFrameRate
+        s.recordingQuality = recordingQuality
         s.showDebugBox = showDebugBox
         settingsLock.lock()
         settings = s
@@ -280,14 +371,58 @@ final class CameraEngine: NSObject, ObservableObject {
         return AVCaptureDevice.default(for: .video)
     }
 
+    /// 换分辨率时重建会话。摄像头达不到所选尺寸时不会放大 —— 只保证不高于所选。
+    private func applyCapturePreset() {
+        guard isRunning else { return }
+        sessionQueue.async { [weak self] in self?.configureSession() }
+    }
+
+    /// 把摄像头的帧率锁到目标值。摄像头不支持该帧率时写一条诊断并保持默认。
+    private func applyFrameRateLimit(to device: AVCaptureDevice?, frameRate: Int? = nil) {
+        guard let device else { return }
+        let targetFPS = frameRate ?? currentSettings().recordingFrameRate.rawValue
+        let targetRate = Double(targetFPS)
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            let format = device.activeFormat
+            guard format.videoSupportedFrameRateRanges.contains(where: {
+                      $0.minFrameRate <= targetRate && $0.maxFrameRate >= targetRate
+                  }) else {
+                writeDiagnostic("所选帧率 \(Int(targetRate))fps 不受当前摄像头/分辨率支持，使用摄像头默认帧率")
+                return
+            }
+            let duration = CMTime(value: 1, timescale: CMTimeScale(targetFPS))
+            device.activeVideoMinFrameDuration = duration
+            device.activeVideoMaxFrameDuration = duration
+        } catch {
+            writeDiagnostic("无法设置摄像头帧率：\(error.localizedDescription)")
+        }
+    }
+
     // MARK: - 会话配置
 
     private func configureSession() {
         session.beginConfiguration()
-        defer { session.commitConfiguration() }
+        defer {
+            session.commitConfiguration()
+            // 帧率必须等预设生效之后再设 —— 换分辨率会改变可选帧率范围，
+            // 提前设可能被摄像头忽略。
+            applyFrameRateLimit(to: currentDevice(),
+                                frameRate: currentSettings().recordingFrameRate.rawValue)
+        }
 
-        if session.canSetSessionPreset(.hd1280x720) {
-            session.sessionPreset = .hd1280x720
+        let current = currentSettings()
+        let requestedPreset = current.recordingResolution.capturePreset
+        let fallbackPresets: [AVCaptureSession.Preset] = [
+            requestedPreset,
+            .hd1920x1080,
+            .hd1280x720,
+            .vga640x480,
+            .high
+        ]
+        if let supportedPreset = fallbackPresets.first(where: { session.canSetSessionPreset($0) }) {
+            session.sessionPreset = supportedPreset
         }
 
         for input in session.inputs { session.removeInput(input) }
@@ -394,31 +529,69 @@ final class CameraEngine: NSObject, ObservableObject {
         }
         selectedEffect = .custom
         overlayImage = image
+        // 自定义图片没有「面孔开口」这个概念，调试框就不画开口了。
+        overlayOpening = nil
+        // 自定义图片和内置头套的目标不同（盖住脸 vs 让脸从开口露出来），
+        // 所以套用的是另一套默认参数，不能沿用内置头套那套。
+        sizeScale = CoverDefaults.customSizeScale
+        offsetX = CoverDefaults.offsetX
+        offsetY = CoverDefaults.offsetY
         if isRunning {
             statusMessage = "已选择「\(url.lastPathComponent)」，可以开始录制了"
         }
     }
 
-    /// 使用随 App 打包的猪头头套。素材保留透明通道，会跟普通脸罩一样
+    /// 使用随 App 打包的内置头套。素材保留透明通道，会跟普通脸罩一样
     /// 自动跟随人脸，并直接合成进录制的视频。
-    func usePigHeadEffect() {
-        guard let url = Bundle.main.url(forResource: "PigHead", withExtension: "png"),
+    ///
+    /// 所有内置素材都归一化过（脸洞开口等宽、居中），所以换款式时套用同一组默认参数；
+    /// 同时把上一款的微调清掉 —— 各款几何不同，留着上一款的位置只会更难对准。
+    func useCover(_ cover: HeadCover) {
+        guard let url = Bundle.main.url(forResource: cover.id, withExtension: "png"),
               let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            statusMessage = "❌ 找不到内置猪头头套素材，请重新编译或安装 App"
+            statusMessage = "❌ 找不到内置头套素材「\(cover.name)」，请重新编译或安装 App"
             return
         }
 
-        selectedEffect = .pigHead
+        selectedEffect = .cover(cover.id)
         overlayImage = image
+        overlayOpening = Self.measureOpening(of: url, kind: cover.kind)
+        sizeScale = CoverDefaults.defaultSizeScale(for: cover.kind)
+        offsetX = CoverDefaults.offsetX
+        offsetY = CoverDefaults.offsetY
+
         if isRunning {
-            statusMessage = "已启用猪头头套特效，可以开始录制了"
+            statusMessage = "已换上「\(cover.name)」头套，可以开始录制了"
         }
+    }
+
+    /// 量一次素材的锚点，转成相对画布的比例。
+    ///
+    /// 头套量的是面孔开口，整脸覆盖量的是轮廓包围盒 —— 两者的锚点定义不同，
+    /// 但都归一到同一个 `OpeningGuide`，下游（归一化、调试框）不用分两条路。
+    /// 素材是 1024×1024，全图扫描大约 10ms，只在换脸罩时跑一次，不影响帧率。
+    private static func measureOpening(of url: URL,
+                                       kind: HeadCover.Kind) -> Compositor.OpeningGuide? {
+        let measured: CoverGeometry.Opening?
+        switch kind {
+        case .hood: measured = CoverGeometry.measure(path: url.path)
+        case .mask: measured = CoverGeometry.measureMask(path: url.path)
+        }
+        guard let measured, measured.canvasSize > 0 else { return nil }
+        let canvas = Double(measured.canvasSize)
+        return Compositor.OpeningGuide(
+            widthFraction: Double(measured.openingWidth) / canvas,
+            heightFraction: Double(measured.openingHeight) / canvas,
+            offsetX: (Double(measured.center.x) - canvas / 2) / canvas,
+            offsetY: (Double(measured.center.y) - canvas / 2) / canvas
+        )
     }
 
     func clearOverlay() {
         selectedEffect = .none
         overlayImage = nil
+        overlayOpening = nil
         if isRunning {
             statusMessage = "已关闭脸罩特效"
         }
@@ -467,11 +640,13 @@ final class CameraEngine: NSObject, ObservableObject {
             self.audioInput = nil
             self.videoAdaptor = nil
             self.sessionStarted = false
+            self.lastAppendedVideoPTS = nil
             self.writerLock.unlock()
 
             guard let w else {
                 DispatchQueue.main.async {
                     self.isRecording = false
+                    self.recordingStartedAt = nil
                     self.statusMessage = "已取消录制"
                 }
                 return
@@ -481,6 +656,7 @@ final class CameraEngine: NSObject, ObservableObject {
                 let ok = w.status == .completed
                 DispatchQueue.main.async {
                     self.isRecording = false
+                    self.recordingStartedAt = nil
                     if ok {
                         self.lastRecordingURL = url
                         self.statusMessage = "✅ 已保存 \(url?.lastPathComponent ?? "")"
@@ -516,14 +692,19 @@ final class CameraEngine: NSObject, ObservableObject {
     private func beginWriter(width: Int, height: Int, at startPTS: CMTime) {
         let url = Self.makeOutputURL()
         let s = currentSettings()
+        // 采集尺寸和输出尺寸可以不同：摄像头可能给得比用户选的档位更高，
+        // 这时候在写文件之前降采样，而不是放大。
+        let outputSize = s.recordingResolution.outputSize(sourceWidth: width, sourceHeight: height)
 
         do {
             let components = try Recorder.makeComponents(
                 url: url,
-                width: width,
-                height: height,
+                width: outputSize.width,
+                height: outputSize.height,
                 audioChannels: s.audioSource == .none ? nil : s.audioSource.outputChannels,
-                startPTS: startPTS
+                startPTS: startPTS,
+                frameRate: s.recordingFrameRate.rawValue,
+                quality: s.recordingQuality
             )
 
             writerLock.lock()
@@ -532,10 +713,12 @@ final class CameraEngine: NSObject, ObservableObject {
             audioInput = components.audioInput
             videoAdaptor = components.adaptor
             audioSessionStart = startPTS
+            lastAppendedVideoPTS = nil
             sessionStarted = true
             writerLock.unlock()
 
             DispatchQueue.main.async { [weak self] in
+                self?.recordingStartedAt = Date()
                 self?.isRecording = true
                 self?.statusMessage = "● 正在录制…"
             }
@@ -567,7 +750,21 @@ final class CameraEngine: NSObject, ObservableObject {
         }
     }
 
-    private func appendFrame(_ source: CVPixelBuffer, at pts: CMTime) {
+    /// 把一帧写进文件。
+    ///
+    /// 做两件事：
+    /// 1. **抽帧** —— 摄像头可能跑在 30fps，用户选了 24fps，这时候丢掉间隔不够的帧，
+    ///    否则实际录出来的 fps 还是摄像头的（摄像头帧率也会被设成目标值，
+    ///    但两者不一致时兜底靠这里）。
+    /// 2. **缩放** —— 采集尺寸和输出尺寸不同时，先按目标宽高比居中裁剪再缩放。
+    ///    不裁剪直接缩放会拉伸画面。
+    private func appendFrame(_ source: CVPixelBuffer, at pts: CMTime, frameRate: Int) {
+        let minimumInterval = 1.0 / Double(max(frameRate, 1))
+        if let lastPTS = lastAppendedVideoPTS,
+           CMTimeGetSeconds(CMTimeSubtract(pts, lastPTS)) + 0.000_001 < minimumInterval {
+            return
+        }
+
         writerLock.lock()
         let input = videoInput
         let adaptor = videoAdaptor
@@ -581,8 +778,48 @@ final class CameraEngine: NSObject, ObservableObject {
         guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &destination) == kCVReturnSuccess,
               let destination else { return }
 
-        copyPixelBuffer(from: source, to: destination)
-        adaptor.append(destination, withPresentationTime: pts)
+        let sourceWidth = CVPixelBufferGetWidth(source)
+        let sourceHeight = CVPixelBufferGetHeight(source)
+        let outputWidth = CVPixelBufferGetWidth(destination)
+        let outputHeight = CVPixelBufferGetHeight(destination)
+
+        if sourceWidth == outputWidth && sourceHeight == outputHeight {
+            copyPixelBuffer(from: source, to: destination)
+        } else {
+            CVPixelBufferLockBaseAddress(destination, [])
+            defer { CVPixelBufferUnlockBaseAddress(destination, []) }
+
+            let image = CIImage(cvPixelBuffer: source)
+            let sourceAspect = Double(sourceWidth) / Double(sourceHeight)
+            let outputAspect = Double(outputWidth) / Double(outputHeight)
+            let cropped: CIImage
+            if sourceAspect > outputAspect {
+                let cropWidth = CGFloat(sourceHeight) * CGFloat(outputAspect)
+                cropped = image.cropped(to: CGRect(x: image.extent.midX - cropWidth / 2,
+                                                   y: image.extent.minY,
+                                                   width: cropWidth,
+                                                   height: image.extent.height))
+            } else {
+                let cropHeight = CGFloat(sourceWidth) / CGFloat(outputAspect)
+                cropped = image.cropped(to: CGRect(x: image.extent.minX,
+                                                   y: image.extent.midY - cropHeight / 2,
+                                                   width: image.extent.width,
+                                                   height: cropHeight))
+            }
+            let sx = CGFloat(outputWidth) / cropped.extent.width
+            let sy = CGFloat(outputHeight) / cropped.extent.height
+            let scaled = cropped
+                .transformed(by: CGAffineTransform(translationX: -cropped.extent.minX,
+                                                   y: -cropped.extent.minY))
+                .transformed(by: CGAffineTransform(scaleX: sx, y: sy))
+            let bounds = CGRect(x: 0, y: 0, width: outputWidth, height: outputHeight)
+            ciContext.render(scaled, to: destination, bounds: bounds,
+                             colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        }
+
+        if adaptor.append(destination, withPresentationTime: pts) {
+            lastAppendedVideoPTS = pts
+        }
     }
 
     // MARK: - 人脸检测
@@ -604,6 +841,34 @@ final class CameraEngine: NSObject, ObservableObject {
 
         return FaceMeasurement(boundingBox: face.boundingBox,
                                roll: face.roll?.doubleValue ?? 0)
+    }
+
+    /// 按实测耗时决定「每几帧检测一次」。
+    ///
+    /// **必须带迟滞。** 单个阈值（原来写的是 `cost > 0.015 ? 2 : 1`）在耗时贴着阈值抖动时，
+    /// 会让 `detectEvery` 每帧翻转：一会儿每帧有检测、一会儿隔帧才有。
+    /// 隔帧那一帧只能靠速度外推，遮罩的运动节奏于是变得不匀 —— 看起来就是「慌」。
+    /// 所以降级和恢复用两个不同阈值，并且要连续若干帧确认才切换。
+    private func updateDetectionCadence() {
+        guard let cost = visionCost else { return }
+
+        if cost > Self.slowCostThreshold {
+            slowStreak += 1
+            fastStreak = 0
+        } else if cost < Self.fastCostThreshold {
+            fastStreak += 1
+            slowStreak = 0
+        } else {
+            // 中间地带：保持现状，不来回切
+            slowStreak = 0
+            fastStreak = 0
+        }
+
+        if detectEvery == 1 && slowStreak >= Self.slowStreakFrames {
+            detectEvery = 2
+        } else if detectEvery == 2 && fastStreak >= Self.fastStreakFrames {
+            detectEvery = 1
+        }
     }
 
     private func updateFace(in pixelBuffer: CVPixelBuffer,
@@ -630,9 +895,7 @@ final class CameraEngine: NSObject, ObservableObject {
             measurement = detectLargestFace(in: pixelBuffer)
             let cost = CACurrentMediaTime() - started
             visionCost = visionCost.map { $0 * 0.9 + cost * 0.1 } ?? cost
-            if let cost = visionCost {
-                detectEvery = cost > 0.015 ? 2 : 1
-            }
+            updateDetectionCadence()
             if measurement != nil {
                 missedFrames = 0
             } else {
@@ -644,8 +907,12 @@ final class CameraEngine: NSObject, ObservableObject {
 
         if let detectedRoll = measurement?.roll {
             if hasFaceRoll {
-                // 角度比位置更容易抖，稍微压一下噪声，同时保持歪头时足够跟手。
-                faceRoll += (detectedRoll - faceRoll) * 0.35
+                // 歪头角度同样按「有多动」自适应。
+                // 静止时必须压得很狠：脸罩比脸大（sizeScale 约 2.5 倍），
+                // 外缘位移 = 半径 × 角度，一点点角度噪声就会让脸罩边缘明显摆动。
+                let gain = Self.rollRestGain
+                    + (Self.rollMovingGain - Self.rollRestGain) * faceTracker.motion
+                faceRoll += (detectedRoll - faceRoll) * gain
             } else {
                 faceRoll = detectedRoll
                 hasFaceRoll = true
@@ -721,27 +988,38 @@ final class CameraEngine: NSObject, ObservableObject {
                             height: CVPixelBufferGetHeight(pixelBuffer),
                             at: pts)
             }
-            appendFrame(pixelBuffer, at: pts)
+            appendFrame(pixelBuffer, at: pts, frameRate: s.recordingFrameRate.rawValue)
         }
 
         // 调试框只画在预览上，不参与录制
         if s.showDebugBox {
-            Compositor.drawDebugBox(into: pixelBuffer, faceNormalized: face)
+            Compositor.drawDebugBox(into: pixelBuffer,
+                                    faceNormalized: face,
+                                    overlay: s.image,
+                                    opening: overlayOpening,
+                                    sizeScale: s.sizeScale,
+                                    offsetX: s.offsetX,
+                                    offsetY: s.offsetY)
         }
 
         publishPreview(from: pixelBuffer)
     }
 
     /// 每秒往诊断文件记一行：检测到的人脸框 vs 实际贴图用的框。
-    /// 用来判断「遮罩和脸反向」到底是跟踪问题还是镜像语义问题。
+    ///
+    /// 原来只记了 x，所以「位置不对」这类问题只能靠猜。现在把 y、脸框尺寸、
+    /// 贴图缩放都记下来 —— 出问题时对着这行数字就能算出贴图到底落在哪。
     private func logFaceDiagnostic(face: CGRect, time: Double) {
         guard time - lastFaceLogTime >= 1.0 else { return }
         lastFaceLogTime = time
         let s = currentSettings()
+        // 贴图中心 = 人脸中心 + 偏移（偏移量的单位是脸宽 / 脸高）
+        let overlayX = face.midX + CGFloat(s.offsetX) * face.width
+        let overlayY = face.midY - CGFloat(s.offsetY) * face.height
         writeDiagnostic(String(
-            format: "人脸中心x=%.3f | 贴图中心x=%.3f | 镜像=%@ | 逐帧检测=%@ | 已追踪=%@",
-            face.midX,
-            face.midX + CGFloat(s.offsetX) * face.width,
+            format: "人脸中心=(%.3f,%.3f) 脸框=%.3f×%.3f | 贴图中心=(%.3f,%.3f) 缩放=%.2f×脸宽 | 镜像=%@ | 逐帧检测=%@ | 已追踪=%@",
+            face.midX, face.midY, face.width, face.height,
+            overlayX, overlayY, s.sizeScale,
             s.mirror ? "开" : "关",
             detectEvery == 1 ? "是" : "否",
             faceTracker.predicted == nil ? "否" : "是"

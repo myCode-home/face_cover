@@ -3,9 +3,16 @@ import Foundation
 
 // 无头自检：验证人脸跟踪器的相位延迟与抗抖。
 //
-// 用户报的现象是「开镜像后遮罩跟脸反向移动」。遮罩位置是从人脸位置推导的，
-// 所以不可能是算错位置 —— 真正的嫌疑是 **延迟**：头来回摆动时，
-// 滞后半个周期的输出看起来就是反相摆动。
+// 历史：用户报「开镜像后遮罩跟脸反向移动」，查明是延迟问题（不是算错位置），
+// 于是引入「轻平滑 + 速度外推」。
+//
+// 后来又报「人不动的时候也特别慌」。这次查明是 **平滑增益对随机噪声几乎无效**：
+// 增益 α 的指数平滑只把标准差降到 √(α/(2−α)) 倍，α = 0.85 时是 0.86 倍，等于没压。
+// 于是改成按速度自适应（静止用低增益、移动用高增益）。
+//
+// 教训记在这里：**原来的静止抖动测试用的是「±0.002 完美交替」方波**，
+// 那对低通滤波器是最容易压的信号，所以一路绿灯却没反映真实情况。
+// 现在改用固定种子的**随机**噪声，这才是 Vision 逐帧检测的真实形态。
 //
 // 运行: ./test.sh
 
@@ -29,6 +36,15 @@ func faceX(atFrame frame: Int) -> Double {
 
 func faceRect(atFrame frame: Int) -> CGRect {
     CGRect(x: faceX(atFrame: frame) - 0.1, y: 0.4, width: 0.2, height: 0.2)
+}
+
+/// 固定种子的伪随机，保证自检结果可复现
+struct SeededRandom {
+    var state: UInt64
+    mutating func next() -> Double {          // [-1, 1)
+        state = state &* 6364136223846793005 &+ 1442695040888963407
+        return Double((state >> 33) & 0xFFFFFF) / Double(0x800000) - 1.0
+    }
 }
 
 /// 互相关求等效延迟。必须先去掉直流分量，否则 0.5 的均值会淹没一切。
@@ -95,7 +111,7 @@ func runOldApproach() -> [Double] {
     return output
 }
 
-// MARK: 新做法：FaceTracker（参数可调，方便扫参）
+// MARK: FaceTracker
 
 func runTracker(config: FaceTracker, detectEvery: Int = 1) -> [Double] {
     var tracker = config
@@ -108,27 +124,41 @@ func runTracker(config: FaceTracker, detectEvery: Int = 1) -> [Double] {
     return output
 }
 
-/// 人脸静止、检测带噪声时，输出的残余抖动
+/// 把静止增益设成和移动增益一样，就等价于改造前的「固定增益」行为
+func fixedGainConfig() -> FaceTracker {
+    var config = FaceTracker()
+    config.restPositionGain = config.positionGain
+    config.restSizeGain = config.sizeGain
+    return config
+}
+
+/// 人脸静止、检测带**随机**噪声时，输出中心的峰峰值。
+///
+/// 噪声量级：位置 ±0.002（1280 宽画面上约 ±2.6px）、大小 ±1%。
+/// 这是 Vision 逐帧人脸框的真实形态 —— 随机的，不是交替方波。
 func staticJitter(config: FaceTracker, detectEvery: Int = 1) -> Double {
     var tracker = config
+    var random = SeededRandom(state: 0x9E3779B9)
     var output: [Double] = []
-    for frame in 0..<90 {
-        let noise = (frame % 2 == 0) ? 0.002 : -0.002
+
+    for frame in 0..<150 {
+        let noiseX = random.next() * 0.002
+        let noiseY = random.next() * 0.002
+        let sizeFactor = 1 + random.next() * 0.01
         let measurement = (frame % detectEvery == 0)
-            ? CGRect(x: 0.4 + noise, y: 0.4, width: 0.2, height: 0.2)
+            ? CGRect(x: 0.4 + noiseX, y: 0.4 + noiseY,
+                     width: 0.2 * sizeFactor, height: 0.2 * sizeFactor)
             : nil
         tracker.update(measurement: measurement, at: Double(frame) / FPS)
         output.append(Double(tracker.predicted?.midX ?? 0.5))
     }
-    return swing(Array(output[30...]))
+    return swing(Array(output[60...]))
 }
 
 // MARK: 跑
 
 let input = (0..<FRAMES).map { faceX(atFrame: $0) }
 
-// 说明：最初怀疑「遮罩反向移动」是延迟导致的。实测下来这个假设 **不成立** ——
-// 旧做法在 0.8Hz 下延迟就是 0 帧。这里如实记录对比，不硬套结论。
 print("\n[1] 新旧做法对比（诚实版：旧做法并没有明显延迟）")
 do {
     let oldOutput = runOldApproach()
@@ -145,7 +175,7 @@ do {
     check(newRatio >= oldRatio, "新做法同向性不差于旧做法（\(Int(newRatio * 100))% vs \(Int(oldRatio * 100))%）")
 }
 
-print("\n[2] 扫参数（每帧检测）")
+print("\n[2] 扫参数（每帧检测，随机噪声）")
 print("     positionGain  velocityGain  leadTime   延迟(帧)  同向%   摆动    静止抖动")
 do {
     let candidates: [(Double, Double, Double)] = [
@@ -170,7 +200,37 @@ do {
     }
 }
 
-print("\n[3] 源码里的默认配置是否达标")
+print("\n[3] 自适应 vs 固定增益：静止时该更稳，移动时不该变差")
+do {
+    let adaptive = FaceTracker()
+    let fixed = fixedGainConfig()
+
+    let adaptiveJitter = staticJitter(config: adaptive)
+    let fixedJitter = staticJitter(config: fixed)
+
+    let adaptiveOut = runTracker(config: adaptive)
+    let fixedOut = runTracker(config: fixed)
+    let adaptiveLag = bestLagFrames(input: input, output: adaptiveOut, maxLag: 20)
+    let fixedLag = bestLagFrames(input: input, output: fixedOut, maxLag: 20)
+    let adaptiveRatio = inPhaseRatio(input: input, output: adaptiveOut)
+    let fixedRatio = inPhaseRatio(input: input, output: fixedOut)
+    let adaptiveAmp = swing(adaptiveOut) / swing(input)
+    let fixedAmp = swing(fixedOut) / swing(input)
+
+    print(String(format: "     固定增益 0.85:    静止抖动 %.5f  延迟 %d 帧  同向 %.0f%%  幅度 %.0f%%",
+                 fixedJitter, fixedLag, fixedRatio * 100, fixedAmp * 100))
+    print(String(format: "     自适应   0.85/%.2f: 静止抖动 %.5f  延迟 %d 帧  同向 %.0f%%  幅度 %.0f%%",
+                 adaptive.restPositionGain, adaptiveJitter,
+                 adaptiveLag, adaptiveRatio * 100, adaptiveAmp * 100))
+
+    check(adaptiveJitter < fixedJitter * 0.5,
+          "静止抖动至少压掉一半（\(String(format: "%.5f", adaptiveJitter)) vs \(String(format: "%.5f", fixedJitter))）")
+    check(adaptiveLag <= fixedLag, "自适应没有引入额外延迟")
+    check(adaptiveRatio > 0.9, "移动时仍然同向（\(Int(adaptiveRatio * 100))%）")
+    check(adaptiveAmp > 0.85, "移动时幅度基本保留（\(Int(adaptiveAmp * 100))%）")
+}
+
+print("\n[4] 源码里的默认配置是否达标")
 do {
     let config = FaceTracker()
     let output = runTracker(config: config)
@@ -178,16 +238,22 @@ do {
     let ratio = inPhaseRatio(input: input, output: output)
     let amplitudeRatio = swing(output) / swing(input)
     let jitter = staticJitter(config: config)
+    let jitterEveryOther = staticJitter(config: config, detectEvery: 2)
 
-    print(String(format: "     默认: positionGain=%.2f velocityGain=%.2f sizeGain=%.2f leadTime=%.3f",
-                 config.positionGain, config.velocityGain, config.sizeGain, config.leadTime))
-    print(String(format: "     延迟 %d 帧 (%.0fms)   同向 %.0f%%   摆动保留 %.0f%%   静止抖动 %.5f",
-                 lag, Double(lag) / FPS * 1000, ratio * 100, amplitudeRatio * 100, jitter))
+    print(String(format: "     默认: positionGain=%.2f restPositionGain=%.2f sizeGain=%.2f restSizeGain=%.2f leadTime=%.3f",
+                 config.positionGain, config.restPositionGain,
+                 config.sizeGain, config.restSizeGain, config.leadTime))
+    print(String(format: "     延迟 %d 帧 (%.0fms)   同向 %.0f%%   摆动保留 %.0f%%",
+                 lag, Double(lag) / FPS * 1000, ratio * 100, amplitudeRatio * 100))
+    print(String(format: "     静止抖动: 每帧检测 %.5f   每 2 帧检测 %.5f", jitter, jitterEveryOther))
 
     check(lag <= 2, "延迟 ≤ 2 帧（实测 \(lag) 帧 / \(Int(Double(lag) / FPS * 1000))ms）")
     check(ratio > 0.9, "绝大多数时间与脸同向（\(Int(ratio * 100))%）—— 不会再看起来反向")
     check(amplitudeRatio > 0.85, "摆动幅度基本保留（\(Int(amplitudeRatio * 100))%）")
-    check(jitter <= 0.004, "静止时抖动不超过输入噪声（\(String(format: "%.5f", jitter)) ≤ 0.004）")
+    // 阈值 0.003 ≈ 1280 宽画面上的 3.8px。改造前是 0.0055 左右（约 7px），肉眼明显在晃。
+    check(jitter <= 0.003, "静止时抖动受控（\(String(format: "%.5f", jitter)) ≤ 0.003）")
+    check(jitterEveryOther <= 0.003,
+          "Vision 变慢降到每 2 帧检测后依然受控（\(String(format: "%.5f", jitterEveryOther))）")
 }
 
 print("")

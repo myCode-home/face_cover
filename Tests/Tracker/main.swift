@@ -256,6 +256,36 @@ do {
           "Vision 变慢降到每 2 帧检测后依然受控（\(String(format: "%.5f", jitterEveryOther))）")
 }
 
+print("\n[5] 多人脸轨迹匹配")
+do {
+    var tracker = MultiFaceTracker()
+    let left0 = FaceObservation(boundingBox: CGRect(x: 0.12, y: 0.35, width: 0.18, height: 0.24), roll: 0)
+    let right0 = FaceObservation(boundingBox: CGRect(x: 0.68, y: 0.35, width: 0.18, height: 0.24), roll: 0)
+    let initial = tracker.update(observations: [left0, right0], at: 0.0)
+    check(initial.count == 2, "首次同时建立两个人脸轨迹")
+
+    let leftID = initial.min(by: { $0.boundingBox.midX < $1.boundingBox.midX })?.id
+    let rightID = initial.max(by: { $0.boundingBox.midX < $1.boundingBox.midX })?.id
+    let left1 = FaceObservation(boundingBox: CGRect(x: 0.18, y: 0.35, width: 0.18, height: 0.24), roll: 0.02)
+    let right1 = FaceObservation(boundingBox: CGRect(x: 0.62, y: 0.35, width: 0.18, height: 0.24), roll: -0.02)
+    let shuffled = tracker.update(observations: [right1, left1], at: 1.0 / FPS)
+    let matchedLeft = shuffled.min(by: { $0.boundingBox.midX < $1.boundingBox.midX })
+    let matchedRight = shuffled.max(by: { $0.boundingBox.midX < $1.boundingBox.midX })
+    check(matchedLeft?.id == leftID && matchedRight?.id == rightID,
+          "Vision 返回顺序变化时仍按位置匹配原有身份")
+
+    let oneMissing = tracker.update(observations: [
+        FaceObservation(boundingBox: CGRect(x: 0.20, y: 0.35, width: 0.18, height: 0.24), roll: 0)
+    ], at: 2.0 / FPS)
+    check(oneMissing.count == 2, "短暂未检出其中一人时保留短暂轨迹缓冲")
+    let recovered = tracker.update(observations: [
+        FaceObservation(boundingBox: CGRect(x: 0.23, y: 0.35, width: 0.18, height: 0.24), roll: 0),
+        right1
+    ], at: 3.0 / FPS)
+    let recoveredLeft = recovered.min(by: { $0.boundingBox.midX < $1.boundingBox.midX })
+    check(recoveredLeft?.id == leftID, "短暂遮挡后重新识别回同一轨迹")
+}
+
 print("")
 if failures == 0 {
     print("全部通过 ✅")

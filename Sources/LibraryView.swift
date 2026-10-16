@@ -16,6 +16,8 @@ struct LibraryView: View {
         }
         .frame(minWidth: 660, minHeight: 440)
         .onAppear { library.refresh() }
+        // 关掉窗口就把「刚录完」的高亮撤掉 —— 否则下次打开会看到一条没来由的高亮
+        .onDisappear { library.clearHighlight() }
     }
 
     // MARK: 顶部
@@ -61,20 +63,35 @@ struct LibraryView: View {
         if library.entries.isEmpty {
             emptyState
         } else {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(library.entries) { entry in
-                        RecordingRow(
-                            entry: entry,
-                            onPlay: { library.play(entry) },
-                            onReveal: { library.reveal(entry) },
-                            onCopyPath: { library.copyPath(entry) },
-                            onDelete: { library.confirmAndTrash(entry) }
-                        )
-                        Divider().padding(.leading, 14)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(library.entries) { entry in
+                            RecordingRow(
+                                entry: entry,
+                                highlighted: entry.url == library.highlightURL,
+                                settled: library.highlightSettled,
+                                onPlay: { library.play(entry) },
+                                onReveal: { library.reveal(entry) },
+                                onCopyPath: { library.copyPath(entry) },
+                                onDelete: { library.confirmAndTrash(entry) }
+                            )
+                            Divider().padding(.leading, 14)
+                        }
                     }
                 }
+                .onAppear { scrollToHighlight(proxy) }
+                // 高亮目标换了，或者列表刚扫描完（元数据在后台队列读，可能还没这一段）—— 两种都要再试一次
+                .onChange(of: library.highlightURL) { _, _ in scrollToHighlight(proxy) }
+                .onChange(of: library.entries) { _, _ in scrollToHighlight(proxy) }
             }
+        }
+    }
+
+    private func scrollToHighlight(_ proxy: ScrollViewProxy) {
+        guard let url = library.highlightURL else { return }
+        withAnimation(.easeOut(duration: 0.35)) {
+            proxy.scrollTo(url, anchor: .center)
         }
     }
 
@@ -110,6 +127,10 @@ struct LibraryView: View {
 
 private struct RecordingRow: View {
     let entry: RecordingEntry
+    /// 是不是「刚录完、要定位」的那一段
+    let highlighted: Bool
+    /// 高亮是否已经落定（刚到位时亮一下，随后收成低调底色）
+    let settled: Bool
     let onPlay: () -> Void
     let onReveal: () -> Void
     let onCopyPath: () -> Void
@@ -166,12 +187,34 @@ private struct RecordingRow: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
+        .background(highlightBackground)
+        // 用一个数值当驱动：到位时 0 → 0.20，1.4 秒后 0.20 → 0.07，两次都自动过渡。
+        // 这台机器没有 SwiftUIMacros，`@State` 用不了，所以不能自己写动画状态。
+        .animation(.easeOut(duration: 0.45), value: highlightTint)
         .contextMenu {
             Button("播放", action: onPlay)
             Button("在访达中显示", action: onReveal)
             Button("复制文件路径", action: onCopyPath)
             Divider()
             Button("删除（移到废纸篓）", role: .destructive, action: onDelete)
+        }
+    }
+
+    /// 0 = 没有高亮。刚到位时亮一点吸引视线，随后收成几乎看不出的底色 —— 用户本来就盯着刚录完的那段，不需要一直强提示。
+    private var highlightTint: Double {
+        guard highlighted else { return 0 }
+        return settled ? 0.07 : 0.20
+    }
+
+    @ViewBuilder
+    private var highlightBackground: some View {
+        HStack(spacing: 0) {
+            // 左侧一根细条，配合底色一起用「定位到这一行」更明确
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color.accentColor.opacity(highlightTint * 2.2))
+                .frame(width: 3)
+                .padding(.vertical, 6)
+            Color.accentColor.opacity(highlightTint)
         }
     }
 

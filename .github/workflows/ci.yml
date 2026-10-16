@@ -3,8 +3,11 @@ name: 自检
 on:
   push:
     branches: [main]
+  # 所有 PR 都跑，不限制目标分支。
+  # 原来写的是 `branches: [main]`，于是**堆叠 PR**（base 指向另一个功能分支而不是 main）
+  # 完全拿不到 CI —— 而堆叠恰恰是「两个 PR 改同一批文件、想避免合并冲突」时最该用的办法。
+  # 结果是：为了躲开冲突而堆叠，代价是丢掉 CI，不划算。
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 # 同一个分支连续推送时，取消上一次还在跑的，省时间

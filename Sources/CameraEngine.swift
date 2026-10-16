@@ -44,6 +44,17 @@ private struct SettingsSnapshot {
     var showDebugBox = false
 }
 
+/// 录完一段后弹出的「已保存」提示。
+///
+/// 看一眼就会被清掉，所以不会反复弹。放在引擎上而不是界面上，是因为
+/// 保存完成的回调在视频线程里，界面只需要订阅。
+struct SavedAlert: Identifiable, Equatable {
+    let url: URL
+    let fileName: String
+    let sizeText: String
+    var id: URL { url }
+}
+
 // MARK: - 引擎
 
 final class CameraEngine: NSObject, ObservableObject {
@@ -58,6 +69,8 @@ final class CameraEngine: NSObject, ObservableObject {
     @Published private(set) var faceVisible = false
     @Published private(set) var trackedFaceCount = 0
     @Published private(set) var lastRecordingURL: URL?
+    /// 录完一段后要弹的「已保存」提示，看一眼就会被清掉
+    @Published var savedAlert: SavedAlert?
     @Published private(set) var micAvailable = false
     @Published private(set) var selectedEffect: FaceEffect = .none
     @Published var statusMessage = "正在请求摄像头权限…"
@@ -599,6 +612,7 @@ final class CameraEngine: NSObject, ObservableObject {
             statusMessage = "摄像头还没准备好，稍等一下再试"
             return
         }
+        // 不强制要求有脸罩：没选图片就录原画。想要挡住脸才需要选一张。
         guard !recordRequested, !isRecording else { return }
         let source = audioSource
         mixer.configure(useMicrophone: source == .both, useSystem: source == .both)
@@ -643,6 +657,17 @@ final class CameraEngine: NSObject, ObservableObject {
                     if ok {
                         self.lastRecordingURL = url
                         self.statusMessage = "✅ 已保存 \(url?.lastPathComponent ?? "")"
+                        // 弹「已保存」提示框。文件大小要等 writer 关掉之后才读得准。
+                        let name = url?.lastPathComponent ?? ""
+                        let bytes = url.flatMap {
+                            (try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? Int) ?? nil
+                        } ?? 0
+                        self.savedAlert = SavedAlert(
+                            url: url ?? Self.outputDirectory,
+                            fileName: name,
+                            sizeText: ByteCountFormatter.string(fromByteCount: Int64(bytes),
+                                                                countStyle: .file)
+                        )
                     } else {
                         self.statusMessage = "❌ 保存失败：\(w.error?.localizedDescription ?? "未知错误")"
                     }
@@ -654,11 +679,6 @@ final class CameraEngine: NSObject, ObservableObject {
     func openOutputFolder() {
         try? FileManager.default.createDirectory(at: Self.outputDirectory, withIntermediateDirectories: true)
         NSWorkspace.shared.open(Self.outputDirectory)
-    }
-
-    func revealLastRecording() {
-        guard let url = lastRecordingURL else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     // MARK: - 写文件
@@ -990,7 +1010,19 @@ final class CameraEngine: NSObject, ObservableObject {
                              overlayX, overlayY, s.sizeScale)
         }
 
-        writeDiagnostic("多人脸=\(faces.count) [\(centers)]\(primary)"
+        // 「0 张脸」和「根本没检测」是两回事，诊断文件里必须能分开 ——
+        // 没选脸罩时 `updateFaces` 会直接跳过检测（省 CPU），这时恒为 0 张脸，
+        // 不写清楚的话看日志的人会以为人脸检测坏了。
+        let state: String
+        if s.image == nil {
+            state = "未检测（未选脸罩）"
+        } else if !s.trackingEnabled {
+            state = "未检测（已关闭跟随）"
+        } else {
+            state = "\(faces.count) 张"
+        }
+
+        writeDiagnostic("人脸=\(state) [\(centers)]\(primary)"
                         + " | 镜像=\(s.mirror ? "开" : "关") | 检测间隔=\(detectEvery)帧")
     }
 

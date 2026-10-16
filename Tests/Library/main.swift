@@ -162,6 +162,38 @@ do {
     check(library.errorMessage == nil, "没有报错")
 }
 
+print("\n[8] 定位高亮")
+do {
+    let lib = RecordingLibrary(directory: workDirectory)
+    let a = workDirectory.appendingPathComponent("highlight-a.mov")
+    let b = workDirectory.appendingPathComponent("highlight-b.mov")
+
+    // 初始态：没有高亮
+    check(lib.highlightURL == nil, "初始没有高亮")
+    check(!lib.highlightSettled, "初始没有落定标记")
+
+    // 定位到 a：立刻高亮，但还没落定（落定要等一会儿，让「先亮一下」看得见）
+    lib.highlight(a)
+    check(lib.highlightURL == a, "定位到 a")
+    check(!lib.highlightSettled, "刚定位时还没落定")
+
+    // 立刻改定位到 b：a 的落定计时器不应该把 b 提前落定，
+    // 否则「先亮一下」的过程会被跳过，高亮直接从低调态出现
+    lib.highlight(b)
+    pump(1.8)
+    check(lib.highlightURL == b, "定位已切到 b")
+    check(lib.highlightSettled, "b 的落定计时器到点后落定")
+
+    // a 的旧计时器到点也不该影响 b
+    pump(1.0)
+    check(lib.highlightSettled, "旧计时器不影响已落定的 b")
+
+    // 清掉
+    lib.clearHighlight()
+    check(lib.highlightURL == nil, "清掉之后没有高亮")
+    check(!lib.highlightSettled, "清掉之后落定标记也复位")
+}
+
 print("")
 if failures == 0 {
     print("全部通过 ✅")

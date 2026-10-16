@@ -49,6 +49,17 @@ struct ContentView: View {
         .onChange(of: engine.lastRecordingURL) { _, newValue in
             if newValue != nil { library.refresh() }
         }
+        // 录完一段弹一次「已保存」。看一眼就消失，不会反复弹。
+        .alert(item: $engine.savedAlert) { alert in
+            Alert(
+                title: Text("录像已保存"),
+                message: Text("\(alert.fileName)\n\(alert.sizeText)"),
+                primaryButton: .default(Text("查看")) {
+                    openRecording(alert.url)
+                },
+                secondaryButton: .cancel(Text("好"))
+            )
+        }
     }
 
     // MARK: - 预览
@@ -101,7 +112,8 @@ struct ContentView: View {
             let seconds = elapsed % 60
             return String(format: "录制中 %02d:%02d", minutes, seconds)
         }
-        if engine.overlayImage == nil { return "未选脸罩（录原画）" }
+        // 没选脸罩时不写「未选脸罩」—— 那是可选操作，用中性的模式名就行
+        if engine.overlayImage == nil { return "原画模式" }
         return engine.faceVisible ? "已匹配 \(engine.trackedFaceCount) 张脸" : "未检测到人脸（可继续录制）"
     }
 
@@ -171,7 +183,7 @@ struct ContentView: View {
                 coverPicker
             }
 
-            Text("也可以直接把图片拖到左边的预览画面上。")
+            Text("也可以直接把图片拖到左边的预览画面上。不选脸罩也能直接录制原画。")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -660,30 +672,6 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
             }
-
-            if let url = engine.lastRecordingURL {
-                Button {
-                    engine.revealLastRecording()
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "film")
-                        Text(url.lastPathComponent)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer(minLength: 4)
-                        Image(systemName: "arrow.up.forward.app")
-                    }
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(Color.primary.opacity(0.05),
-                                in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.accentColor)
-                .help("在访达中显示这段录像")
-            }
         }
         .padding(14)
         .background(.regularMaterial)
@@ -790,6 +778,16 @@ struct ContentView: View {
     }
 
     // MARK: - 动作
+
+    /// 弹框里点「查看」：打开录像库，滚动到刚录完的那一段并高亮。
+    ///
+    /// 顺序有讲究：先刷新（确保新文件已经在列表里），再设高亮，最后开窗口。
+    /// 窗口已经开着也没关系 —— `highlightURL` 一变，列表会通过 `onChange` 再滚一次。
+    private func openRecording(_ url: URL) {
+        library.refresh()
+        library.highlight(url)
+        openWindow(id: "library")
+    }
 
     private func chooseImage() {
         let panel = NSOpenPanel()

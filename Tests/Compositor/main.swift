@@ -100,6 +100,15 @@ func isGreen(_ p: (r: Int, g: Int, b: Int)) -> Bool { p.g > 200 && p.r < 60 && p
 func isBlue(_ p: (r: Int, g: Int, b: Int)) -> Bool { p.b > 200 && p.r < 60 && p.g < 60 }
 func isMagenta(_ p: (r: Int, g: Int, b: Int)) -> Bool { p.r > 200 && p.b > 200 && p.g < 60 }
 
+/// 按 **CG 坐标**（左下原点）取样。
+///
+/// 别直接把 CG 的 y 传给 `pixel` —— 那个参数是「自顶部往下数」，混用会上下颠倒。
+/// 这个坑很隐蔽：素材大致对称时颠倒着取也照样是背景色，看着一路绿灯；
+/// 一旦贴图上下挪一点（比如默认上移），取到的点就跑到另一侧去了。
+func pixelAt(_ buffer: CVPixelBuffer, _ x: CGFloat, _ yCG: CGFloat) -> (r: Int, g: Int, b: Int) {
+    pixel(buffer, Int(x), H - 1 - Int(yCG))
+}
+
 /// 扫全图，返回满足条件的像素的横向中心（找不到返回 nil）
 func horizontalCenter(_ buffer: CVPixelBuffer,
                       where matches: ((r: Int, g: Int, b: Int)) -> Bool) -> Double? {
@@ -310,9 +319,9 @@ do {
                                                   sizeScale: 1.0, offsetX: 0, offsetY: 0)
         let openingRect = guide.rect(in: target)
 
-        check(isBlue(pixel(buf, Int(openingRect.midX), Int(openingRect.midY))),
+        check(isBlue(pixelAt(buf, openingRect.midX, openingRect.midY)),
               "开口框中心确实是透的（透出背景）")
-        check(!isBlue(pixel(buf, Int(openingRect.midX), Int(openingRect.minY - 5))),
+        check(!isBlue(pixelAt(buf, openingRect.midX, openingRect.minY - 5)),
               "开口框正下方是实心 —— 洞确实偏上，没有画反")
     } else {
         check(false, "量不出合成素材的开口")
@@ -346,7 +355,7 @@ do {
         // 人脸框只占画面中间一小块，否则 sizeScale 2.47 会把脸罩推出缓冲区
         let face = CGRect(x: 0.375, y: 0.375, width: 0.25, height: 0.25)
         let scale = CoverDefaults.defaultSizeScale(for: cover.kind)
-        // 用 App 里真正会用的默认偏移（整脸覆盖是上移，头套是 0）——
+        // 用 App 里真正会用的默认偏移（两类内置素材都是上移）——
         // 自检要盯着实际发货的那套参数，而不是一个测试专用的 0
         let offsetY = CoverDefaults.defaultOffsetY(for: cover.kind)
         let buf = makeBuffer()
@@ -360,37 +369,43 @@ do {
         switch cover.kind {
         case .hood:
             // 头套：锚点中心应该透出背景（脸从开口里露出来）
-            check(isBlue(pixel(buf, Int(anchor.midX), Int(anchor.midY))),
+            check(isBlue(pixelAt(buf, anchor.midX, anchor.midY)),
                   "\(cover.name)：开口中心透出背景")
             // 锚点外侧一点应该是实心的（环有厚度）
-            check(!isBlue(pixel(buf, Int(anchor.minX - 6), Int(target.midY))),
+            check(!isBlue(pixelAt(buf, anchor.minX - 6, target.midY)),
                   "\(cover.name)：开口左侧是实心")
         case .mask:
             // 整脸覆盖：锚点（= 整个头）中心应该被盖住，外侧才是背景
-            check(!isBlue(pixel(buf, Int(anchor.midX), Int(anchor.midY))),
+            check(!isBlue(pixelAt(buf, anchor.midX, anchor.midY)),
                   "\(cover.name)：锚点中心被盖住")
-            check(isBlue(pixel(buf, Int(target.minX - 12), Int(target.midY))),
+            check(isBlue(pixelAt(buf, target.minX - 12, target.midY)),
                   "\(cover.name)：脸罩范围之外是背景")
         }
     }
 }
 
-print("\n[I] 整脸覆盖的默认上移：贴图要整体抬到「头」上，方向不能反")
+print("\n[I] 默认上移：两类内置素材都要整体抬到「头」上，方向不能反")
 do {
-    // 用户报的问题：泰迪熊每次都得手动把「上下」拖到 -0.20 才盖得正。
-    // 根因是 Vision 的人脸框只框住「脸」（眉到下巴），而整脸覆盖要盖的是「头」——
+    // 用户报的问题：泰迪熊每次都得手动把「上下」拖到 -0.20 才盖得正，头套也一样。
+    // 根因是 Vision 的人脸框只框住「脸」（眉到下巴），而内置素材贴的是「头」——
     // 头的中心比脸框中心高约 0.20 个脸框高。这条从像素上盯着方向和量级。
     let root = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-    let path = root.appendingPathComponent("Resources/Cover-Teddy.png").path
 
-    if let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-       let img = CGImageSourceCreateImageAtIndex(src, 0, nil) {
+    for (kind, asset) in [(HeadCover.Kind.hood, "Cover-Pig"), (.mask, "Cover-Teddy")] {
+        let path = root.appendingPathComponent("Resources/\(asset).png").path
+
+        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+            check(false, "读不到 Resources/\(asset).png"); continue
+        }
+
         let face = CGRect(x: 0.375, y: 0.375, width: 0.25, height: 0.25)   // 50×50 px
-        let scale = CoverDefaults.defaultSizeScale(for: .mask)
+        let scale = CoverDefaults.defaultSizeScale(for: kind)
+        let offsetY = CoverDefaults.defaultOffsetY(for: kind)
 
         /// 贴图最上沿在画面里的行号（自顶部往下数）
-        func topEdge(offsetY: Double) -> Int? {
+        func topEdge(_ offsetY: Double) -> Int? {
             let buf = makeBuffer()
             Compositor.drawOverlay(overlay: img, into: buf, faceNormalized: face,
                                    sizeScale: scale, offsetX: 0, offsetY: offsetY)
@@ -400,21 +415,19 @@ do {
             return nil
         }
 
-        let before = topEdge(offsetY: 0)
-        let after = topEdge(offsetY: CoverDefaults.defaultOffsetY(for: .mask))
+        let before = topEdge(0)
+        let after = topEdge(offsetY)
 
         if let before, let after {
-            let expected = CoverDefaults.maskHeadLift * face.height * Double(H)
+            let expected = CoverDefaults.headLift * face.height * Double(H)
             check(after < before,
-                  "默认参数下贴图上沿更高（\(before) → \(after)，自顶部往下数）")
+                  "\(kind.label)：默认参数下贴图上沿更高（\(before) → \(after)，自顶部往下数）")
             check(abs(Double(before - after) - expected) <= 2,
-                  String(format: "上移量就是 %.2f 个脸高（实测 %d px，期望 %.0f px）",
-                         CoverDefaults.maskHeadLift, before - after, expected))
+                  String(format: "%@：上移量就是 %.2f 个脸高（实测 %d px，期望 %.0f px）",
+                         kind.label as NSString, CoverDefaults.headLift, before - after, expected))
         } else {
-            check(false, "没扫到贴图像素（素材透明？）")
+            check(false, "\(kind.label)：没扫到贴图像素（素材透明？）")
         }
-    } else {
-        check(false, "读不到 Resources/Cover-Teddy.png")
     }
 }
 

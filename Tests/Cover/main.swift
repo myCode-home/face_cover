@@ -113,6 +113,57 @@ do {
           String(format: "两类默认缩放量级接近（头套 %.2f vs 整脸 %.2f）", hood, mask))
 }
 
+print("\n[4] 整脸覆盖的默认纵向偏移要把它抬到「头」上")
+do {
+    // 单位说明：缩放按**脸框宽**给，偏移按**脸框高**给。诊断日志里脸框 ≈ 0.17×0.30（归一化），
+    // 在 16:9 画面里换算成像素后宽高几乎相等（0.30×9/16 ÷ 0.17 = 0.998），
+    // 所以这里按「脸框高 = 脸框宽 = 1」算，换真实摄像头也差不到 1%。
+    let faceW: Double = 1
+    let faceH: Double = 1
+
+    // 一颗头的纵向范围（相对脸框中心，向上为正）：
+    // 下巴 ≈ 脸框底 = -0.5；发际线以上还有头发，头顶 ≈ 眉线（+0.5）再往上 0.4 → +0.9。
+    let headTop: Double = 0.9
+    let chin: Double = -0.5
+
+    let maskOffset = CoverDefaults.defaultOffsetY(for: .mask)
+    check(maskOffset < 0,
+          String(format: "整脸覆盖默认向上移（offsetY = %.2f，负值 = 上移）", maskOffset))
+    check(abs(maskOffset + CoverDefaults.maskHeadLift) < 0.0001,
+          String(format: "上移量就是 maskHeadLift（%.2f 个脸框高）", CoverDefaults.maskHeadLift))
+    check(abs(maskOffset) <= 0.5, "上移量没有夸张到离谱（|offsetY| ≤ 0.5）")
+    check(CoverDefaults.defaultOffsetY(for: .hood) == 0,
+          "头套默认不挪 —— 锚点就是面孔开口，本来就对准脸")
+
+    for cover in HeadCover.masks {
+        let path = resources.appendingPathComponent("\(cover.id).png").path
+        guard let g = CoverGeometry.measureMask(path: path) else {
+            check(false, "\(cover.name)：量不出轮廓"); continue
+        }
+        let canvas = Double(g.canvasSize)
+        let scale = CoverDefaults.defaultSizeScale(for: .mask)
+        // 轮廓高，换算成「脸框高」的倍数
+        let bboxH = Double(g.openingHeight) / canvas * scale * faceW / faceH
+
+        let lift = -maskOffset          // 贴图中心相对脸框中心上移了多少
+        let top = lift + bboxH / 2
+        let bottom = lift - bboxH / 2
+
+        // 头顶不能露出来（留 0.10 的余量，素材羽化 / 测量漂移都算在内）
+        check(top >= headTop - 0.10,
+              String(format: "%@：头顶盖住了（上沿 %+.2f，头到 %+.2f）",
+                     cover.name as NSString, top, headTop))
+        // 下巴不能露出来
+        check(bottom <= chin + 0.10,
+              String(format: "%@：下巴盖住了（下沿 %+.2f，下巴在 %+.2f）",
+                     cover.name as NSString, bottom, chin))
+        // 反向：不挪的话头顶会露 —— 这条保证「默认上移」不是可有可无的
+        check(bboxH / 2 < headTop - 0.10,
+              String(format: "%@：不上移时头顶确实露出来（上沿只有 %+.2f）",
+                     cover.name as NSString, bboxH / 2))
+    }
+}
+
 print("")
 if failures == 0 {
     print("全部通过 ✅")

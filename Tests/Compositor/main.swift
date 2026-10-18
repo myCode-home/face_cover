@@ -346,12 +346,15 @@ do {
         // 人脸框只占画面中间一小块，否则 sizeScale 2.47 会把脸罩推出缓冲区
         let face = CGRect(x: 0.375, y: 0.375, width: 0.25, height: 0.25)
         let scale = CoverDefaults.defaultSizeScale(for: cover.kind)
+        // 用 App 里真正会用的默认偏移（整脸覆盖是上移，头套是 0）——
+        // 自检要盯着实际发货的那套参数，而不是一个测试专用的 0
+        let offsetY = CoverDefaults.defaultOffsetY(for: cover.kind)
         let buf = makeBuffer()
         Compositor.drawOverlay(overlay: img, into: buf, faceNormalized: face,
-                               sizeScale: scale, offsetX: 0, offsetY: 0)
+                               sizeScale: scale, offsetX: 0, offsetY: offsetY)
         let target = Compositor.overlayTargetRect(overlay: img, faceNormalized: face,
                                                   frameWidth: CGFloat(W), frameHeight: CGFloat(H),
-                                                  sizeScale: scale, offsetX: 0, offsetY: 0)
+                                                  sizeScale: scale, offsetX: 0, offsetY: offsetY)
         let anchor = guide.rect(in: target)
 
         switch cover.kind {
@@ -369,6 +372,49 @@ do {
             check(isBlue(pixel(buf, Int(target.minX - 12), Int(target.midY))),
                   "\(cover.name)：脸罩范围之外是背景")
         }
+    }
+}
+
+print("\n[I] 整脸覆盖的默认上移：贴图要整体抬到「头」上，方向不能反")
+do {
+    // 用户报的问题：泰迪熊每次都得手动把「上下」拖到 -0.20 才盖得正。
+    // 根因是 Vision 的人脸框只框住「脸」（眉到下巴），而整脸覆盖要盖的是「头」——
+    // 头的中心比脸框中心高约 0.20 个脸框高。这条从像素上盯着方向和量级。
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let path = root.appendingPathComponent("Resources/Cover-Teddy.png").path
+
+    if let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+       let img = CGImageSourceCreateImageAtIndex(src, 0, nil) {
+        let face = CGRect(x: 0.375, y: 0.375, width: 0.25, height: 0.25)   // 50×50 px
+        let scale = CoverDefaults.defaultSizeScale(for: .mask)
+
+        /// 贴图最上沿在画面里的行号（自顶部往下数）
+        func topEdge(offsetY: Double) -> Int? {
+            let buf = makeBuffer()
+            Compositor.drawOverlay(overlay: img, into: buf, faceNormalized: face,
+                                   sizeScale: scale, offsetX: 0, offsetY: offsetY)
+            for y in 0..<H {
+                for x in 0..<W where !isBlue(pixel(buf, x, y)) { return y }
+            }
+            return nil
+        }
+
+        let before = topEdge(offsetY: 0)
+        let after = topEdge(offsetY: CoverDefaults.defaultOffsetY(for: .mask))
+
+        if let before, let after {
+            let expected = CoverDefaults.maskHeadLift * face.height * Double(H)
+            check(after < before,
+                  "默认参数下贴图上沿更高（\(before) → \(after)，自顶部往下数）")
+            check(abs(Double(before - after) - expected) <= 2,
+                  String(format: "上移量就是 %.2f 个脸高（实测 %d px，期望 %.0f px）",
+                         CoverDefaults.maskHeadLift, before - after, expected))
+        } else {
+            check(false, "没扫到贴图像素（素材透明？）")
+        }
+    } else {
+        check(false, "读不到 Resources/Cover-Teddy.png")
     }
 }
 

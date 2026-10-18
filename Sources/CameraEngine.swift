@@ -560,10 +560,7 @@ final class CameraEngine: NSObject, ObservableObject {
         sizeScale = CoverDefaults.defaultSizeScale(for: cover.kind)
         offsetX = CoverDefaults.offsetX
         offsetY = CoverDefaults.offsetY
-
-        if isRunning {
-            statusMessage = "已换上「\(cover.name)」头套，可以开始录制了"
-        }
+        statusMessage = "已经准备就绪"
     }
 
     /// 量一次素材的锚点，转成相对画布的比例。

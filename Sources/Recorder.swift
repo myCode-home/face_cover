@@ -13,9 +13,9 @@ enum RecordingResolution: String, CaseIterable, Identifiable, Hashable {
 
     var title: String {
         switch self {
-        case .p480: return "480p（省空间）"
-        case .p720: return "720p（推荐）"
-        case .p1080: return "1080p（清晰）"
+        case .p480: return "480p"
+        case .p720: return "720p"
+        case .p1080: return "1080p"
         }
     }
 

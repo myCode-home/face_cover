@@ -162,6 +162,19 @@ struct ContentView: View {
         return CoverDefaults.sizeScale
     }
 
+    /// 当前脸罩对应的默认纵向偏移。
+    /// 整脸覆盖要盖的是「头」，默认上移 0.20 个脸框高；头套的锚点就是面孔开口，不用挪。
+    /// 「全部复位」和滑块的 `↺` 都必须用这个值 —— 用 0 会把整脸覆盖复位回偏下的位置。
+    private var defaultOffsetY: Double {
+        if let cover = selectedCover {
+            return CoverDefaults.defaultOffsetY(for: cover.kind)
+        }
+        if engine.selectedEffect == .custom {
+            return CoverDefaults.customOffsetY
+        }
+        return 0
+    }
+
     private var effectCard: some View {
         card("脸罩", systemImage: "theatermasks",
              trailing: engine.overlayImage == nil ? nil : AnyView(
@@ -453,7 +466,7 @@ struct ContentView: View {
                 sliderRow("上下",
                           value: $engine.offsetY,
                           range: -2.0...2.0,
-                          defaultValue: CoverDefaults.offsetY) { Self.signed($0) }
+                          defaultValue: defaultOffsetY) { Self.signed($0) }
             }
         }
     }
@@ -461,13 +474,13 @@ struct ContentView: View {
     private var isPlacementDefault: Bool {
         abs(engine.sizeScale - defaultSizeScale) < 0.0001
             && abs(engine.offsetX - CoverDefaults.offsetX) < 0.0001
-            && abs(engine.offsetY - CoverDefaults.offsetY) < 0.0001
+            && abs(engine.offsetY - defaultOffsetY) < 0.0001
     }
 
     private func resetPlacement() {
         engine.sizeScale = defaultSizeScale
         engine.offsetX = CoverDefaults.offsetX
-        engine.offsetY = CoverDefaults.offsetY
+        engine.offsetY = defaultOffsetY
     }
 
     /// `+0.20` / `0.00`，避免出现「-0.00」这种看着像坏了的写法。

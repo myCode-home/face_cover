@@ -535,7 +535,7 @@ final class CameraEngine: NSObject, ObservableObject {
         // 所以套用的是另一套默认参数，不能沿用内置头套那套。
         sizeScale = CoverDefaults.customSizeScale
         offsetX = CoverDefaults.offsetX
-        offsetY = CoverDefaults.offsetY
+        offsetY = CoverDefaults.customOffsetY
         if isRunning {
             statusMessage = "已选择「\(url.lastPathComponent)」，可以开始录制了"
         }
@@ -559,7 +559,8 @@ final class CameraEngine: NSObject, ObservableObject {
         overlayOpening = Self.measureOpening(of: url, kind: cover.kind)
         sizeScale = CoverDefaults.defaultSizeScale(for: cover.kind)
         offsetX = CoverDefaults.offsetX
-        offsetY = CoverDefaults.offsetY
+        // 整脸覆盖默认上移（贴到头而不是脸），头套是 0 —— 见 CoverDefaults.maskHeadLift
+        offsetY = CoverDefaults.defaultOffsetY(for: cover.kind)
         statusMessage = "已经准备就绪"
     }
 

@@ -29,10 +29,14 @@ enum CoverGeometry {
         let height: Int
         var pixels: [UInt8]                 // RGBA, premultipliedLast
 
-        /// 注意：`CGContext` 是左下原点，所以 y = 0 对应图像**底部**。
-        /// 读图和画图都用同一套约定，方向是自洽的，不要额外翻转。
+        /// y 和 `CGContext` 一样**自底部数**（y = 0 是图像底部）。
+        ///
+        /// 坑：bitmap 内存的第 0 行其实对应图像**顶部**，所以这里必须换算一次。
+        /// 早期版本直接按 `y * width + x` 取，量出来的 y 全是上下颠倒的 —— 后果是
+        /// 调试框里的青色「开口框」画到了镜像位置，而 [H] 段的取样又把 CG 的 y 当成了
+        /// 自上而下的行号，两个错互相抵消，自检一路绿灯。
         @inline(__always) func alpha(_ x: Int, _ y: Int) -> UInt8 {
-            pixels[(y * width + x) * 4 + 3]
+            pixels[((height - 1 - y) * width + x) * 4 + 3]
         }
         @inline(__always) func isSolid(_ x: Int, _ y: Int, cut: UInt8) -> Bool {
             alpha(x, y) >= cut
@@ -143,14 +147,33 @@ enum CoverGeometry {
                                    height: CGFloat(sMaxY - sMinY + 1))
 
         let cx = width / 2, cy = height / 2
-        guard !raster.isSolid(cx, cy, cut: alphaCut) else { return nil }
 
-        // 2. 从画布中心洪水填充，拿到「中间那个洞」这一连通域。
-        //    必须从中心起填：素材外面的背景也是透明的，不区分出来的话会把背景一起算进来。
+        // 2. 找起点：画布正中通常是透明的。但**不能**要求它一定透明 ——
+        //    实测兔子那款归一化时开口恰好压在画布正中（差 1px 就量不出来），
+        //    差这几个像素不该让整张图变成「量不出锚点」。从正中向外找最近的透明像素，
+        //    绝大多数素材第一次就命中。
+        var start: (x: Int, y: Int)?
+        var radius = 0
+        while start == nil && radius <= max(width, height) / 4 {
+            for dy in -radius...radius {
+                for dx in -radius...radius where max(abs(dx), abs(dy)) == radius {
+                    let x = cx + dx, y = cy + dy
+                    guard x >= 0, x < width, y >= 0, y < height else { continue }
+                    if !raster.isSolid(x, y, cut: alphaCut) { start = (x, y); break }
+                }
+                if start != nil { break }
+            }
+            radius += 1
+        }
+        guard let start else { return nil }
+
+        // 3. 从起点洪水填充，拿到「中间那个洞」这一连通域。
+        //    必须从洞里起填：素材外面的背景也是透明的，不区分出来的话会把背景一起算进来。
+        //    （下面还有一道保险：开口不能碰到画布边缘，碰到了就说明填到外面去了。）
         var inOpening = [Bool](repeating: false, count: width * height)
-        var stack = [cy * width + cx]
-        inOpening[cy * width + cx] = true
-        var oMinX = cx, oMaxX = cx, oMinY = cy, oMaxY = cy
+        var stack = [start.y * width + start.x]
+        inOpening[start.y * width + start.x] = true
+        var oMinX = start.x, oMaxX = start.x, oMinY = start.y, oMaxY = start.y
 
         while let index = stack.popLast() {
             let x = index % width, y = index / width
@@ -167,6 +190,10 @@ enum CoverGeometry {
             }
             push(x - 1, y); push(x + 1, y); push(x, y - 1); push(x, y + 1)
         }
+
+        // 开口必须是**内部**的透明区域。碰到画布边缘 = 填到了外面的背景
+        // （整脸覆盖素材就是这样），说明这张图没有面孔开口。
+        guard oMinX > 0, oMinY > 0, oMaxX < width - 1, oMaxY < height - 1 else { return nil }
 
         let openingBox = CGRect(x: CGFloat(oMinX), y: CGFloat(oMinY),
                                 width: CGFloat(oMaxX - oMinX + 1),

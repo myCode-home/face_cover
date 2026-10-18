@@ -65,6 +65,9 @@ struct HeadCover: Identifiable, Hashable {
 /// - **整脸覆盖**和**自定义图片**要「把脸盖住」→ 和开口无关，直接按脸宽给倍数。
 /// 之前三者共用同一个 `sizeScale`，导致选自定义图片时被套上内置头套的 2.47，
 /// 图片大得离谱（实测录像里用户手动调到了 1.1~1.3）。
+///
+/// 纵向偏移同理分类型给：两类内置素材默认都向上挪 `headLift` —— 因为 Vision 的人脸框
+/// 框的是「脸」，而它们要贴的是「头」（见下面的说明）；自定义图片是 0。
 enum CoverDefaults {
 
     // MARK: 头套（锚点 = 面孔开口）
@@ -101,13 +104,47 @@ enum CoverDefaults {
     static let customSizeScale: Double = 1.5
 
     static let offsetX: Double = 0
-    static let offsetY: Double = 0
+
+    /// 自定义图片的默认纵向偏移。用户给什么图都有可能（贴纸、表情包、人脸照片），
+    /// 没有可以假定的构图，所以不预设上移，交给滑块。
+    static let customOffsetY: Double = 0
+
+    // MARK: 纵向基准（内置素材为什么默认上移）
+
+    /// 内置脸罩的默认上移量，单位是**脸框高**。
+    ///
+    /// 贴图是「以人脸框中心居中」的，而 Vision 的人脸框只框住「脸」——大约眉线到下巴。
+    /// 头顶（发际线往上还有一层头发）比眉线还要高约 0.4 个脸框高，所以**整颗头的中心
+    /// 比脸框中心高约 0.2 个脸框高**。
+    ///
+    /// 两类素材都吃这个偏移，但原因不同：
+    /// - **整脸覆盖**要盖住的是「头」，不挪就整体偏下 —— 头发露在脸罩上方、下沿垂到脖子。
+    /// - **头套**的开口只有 0.66~0.86 个脸高，按脸框中心对齐时开口顶边正好压在眉线上，
+    ///   眼睛被头套的额头挡住；上移之后眼睛才完整落在开口里，下巴交给头套自己的嘴套。
+    ///
+    /// 这个值不是拍脑袋的：诊断日志里脸框 ≈ 0.17×0.30（归一化，16:9 下宽高几乎相等），
+    /// 用户实测 -0.20 才正好把泰迪熊盖到头顶到下巴，头套也是同一个值。
+    static let headLift: Double = 0.20
+    /// 内置素材的默认纵向偏移（负值 = 向上）
+    static var headOffsetY: Double { -headLift }
 
     /// 按素材类型给默认缩放
     static func defaultSizeScale(for kind: HeadCover.Kind) -> Double {
         switch kind {
         case .hood: return sizeScale
         case .mask: return maskSizeScale
+        }
+    }
+
+    /// 按素材类型给默认纵向偏移。
+    ///
+    /// 「全部复位」和切换款式都走这里 —— 否则复位回 0，又得手动拖一遍。
+    /// 两类现在刚好都是 `headOffsetY`（同一个「框中心在脸上、不在头上」的偏差），
+    /// 但分开写：它们是被分别验收的，将来某类素材改了构图，这两条可以各自走。
+    static func defaultOffsetY(for kind: HeadCover.Kind) -> Double {
+        switch kind {
+        case .hood: return headOffsetY   // 开口顶边要越过眉线，眼睛才露在开口里
+        case .mask: return headOffsetY   // 整颗头都要盖住
         }
     }
 }

@@ -113,6 +113,88 @@ do {
           String(format: "两类默认缩放量级接近（头套 %.2f vs 整脸 %.2f）", hood, mask))
 }
 
+print("\n[4] 两类内置素材的默认纵向偏移：对齐的是「头」，不是「脸」")
+do {
+    // 单位说明：缩放按**脸框宽**给，偏移按**脸框高**给。诊断日志里脸框 ≈ 0.17×0.30（归一化），
+    // 在 16:9 画面里换算成像素后宽高几乎相等（0.30×9/16 ÷ 0.17 = 0.998），
+    // 所以这里按「脸框高 = 脸框宽 = 1」算，换真实摄像头也差不到 1%。
+    let faceW: Double = 1
+    let faceH: Double = 1
+
+    // 一颗头的纵向范围（相对脸框中心，向上为正）：
+    // 下巴 ≈ 脸框底 = -0.5；发际线以上还有头发，头顶 ≈ 眉线（+0.5）再往上 0.4 → +0.9。
+    let headTop: Double = 0.9
+    let chin: Double = -0.5
+    // 眼睛：眉线往下约 0.20 个脸高 → +0.30
+    let eyeLine: Double = 0.30
+
+    for kind in [HeadCover.Kind.hood, HeadCover.Kind.mask] {
+        let offset = CoverDefaults.defaultOffsetY(for: kind)
+        check(offset < 0,
+              String(format: "%@ 默认向上移（offsetY = %.2f，负值 = 上移）", kind.label as NSString, offset))
+        check(abs(offset + CoverDefaults.headLift) < 0.0001,
+              String(format: "%@ 上移量就是 headLift（%.2f 个脸框高）",
+                     kind.label as NSString, CoverDefaults.headLift))
+        check(abs(offset) <= 0.5, "\(kind.label) 上移量没有夸张到离谱（|offsetY| ≤ 0.5）")
+    }
+    check(CoverDefaults.customOffsetY == 0,
+          "自定义图片不预设偏移 —— 用户给什么图都有可能，没有可假定的构图")
+
+    // 整脸覆盖：默认参数下整颗头都要盖住
+    for cover in HeadCover.masks {
+        let path = resources.appendingPathComponent("\(cover.id).png").path
+        guard let g = CoverGeometry.measureMask(path: path) else {
+            check(false, "\(cover.name)：量不出轮廓"); continue
+        }
+        let canvas = Double(g.canvasSize)
+        let scale = CoverDefaults.defaultSizeScale(for: .mask)
+        // 轮廓高，换算成「脸框高」的倍数
+        let bboxH = Double(g.openingHeight) / canvas * scale * faceW / faceH
+
+        let lift = -CoverDefaults.defaultOffsetY(for: .mask)
+        let top = lift + bboxH / 2
+        let bottom = lift - bboxH / 2
+
+        // 头顶不能露出来（留 0.10 的余量，素材羽化 / 测量漂移都算在内）
+        check(top >= headTop - 0.10,
+              String(format: "%@：头顶盖住了（上沿 %+.2f，头到 %+.2f）",
+                     cover.name as NSString, top, headTop))
+        // 下巴不能露出来
+        check(bottom <= chin + 0.10,
+              String(format: "%@：下巴盖住了（下沿 %+.2f，下巴在 %+.2f）",
+                     cover.name as NSString, bottom, chin))
+        // 反向：不挪的话头顶会露 —— 这条保证「默认上移」不是可有可无的
+        check(bboxH / 2 < headTop - 0.10,
+              String(format: "%@：不上移时头顶确实露出来（上沿只有 %+.2f）",
+                     cover.name as NSString, bboxH / 2))
+    }
+
+    // 头套：开口要盖住眼睛，而且不能只擦着边 —— 擦边时头套的额头会压住眉毛
+    var tightest = Double.greatestFiniteMagnitude
+    var tightestWithoutLift = Double.greatestFiniteMagnitude
+    for cover in HeadCover.hoods {
+        let path = resources.appendingPathComponent("\(cover.id).png").path
+        guard let g = CoverGeometry.measure(path: path) else {
+            check(false, "\(cover.name)：量不出开口"); continue
+        }
+        let canvas = Double(g.canvasSize)
+        let scale = CoverDefaults.defaultSizeScale(for: .hood)
+        let openH = Double(g.openingHeight) / canvas * scale * faceW / faceH
+
+        let lift = -CoverDefaults.defaultOffsetY(for: .hood)
+        let margin = lift + openH / 2 - eyeLine      // 眼睛到开口顶边还剩多少
+        tightest = min(tightest, margin)
+        tightestWithoutLift = min(tightestWithoutLift, openH / 2 - eyeLine)
+
+        check(margin >= 0.15,
+              String(format: "%@：眼睛离开口顶边 %.2f 个脸高（开口上沿 %+.2f，眼睛在 %+.2f）",
+                     cover.name as NSString, margin, lift + openH / 2, eyeLine))
+    }
+    check(tightestWithoutLift < 0.10,
+          String(format: "不上移时最紧的一款只剩 %.2f —— 眼睛擦着开口顶边，头套的额头会压住眉毛",
+                 tightestWithoutLift))
+}
+
 print("")
 if failures == 0 {
     print("全部通过 ✅")

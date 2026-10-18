@@ -44,9 +44,15 @@ private struct SettingsSnapshot {
     var showDebugBox = false
 }
 
-private struct FaceMeasurement {
-    let boundingBox: CGRect
-    let roll: Double
+/// 录完一段后弹出的「已保存」提示。
+///
+/// 看一眼就会被清掉，所以不会反复弹。放在引擎上而不是界面上，是因为
+/// 保存完成的回调在视频线程里，界面只需要订阅。
+struct SavedAlert: Identifiable, Equatable {
+    let url: URL
+    let fileName: String
+    let sizeText: String
+    var id: URL { url }
 }
 
 // MARK: - 引擎
@@ -61,7 +67,10 @@ final class CameraEngine: NSObject, ObservableObject {
     @Published private(set) var isRecording = false
     @Published private(set) var recordingStartedAt: Date?
     @Published private(set) var faceVisible = false
+    @Published private(set) var trackedFaceCount = 0
     @Published private(set) var lastRecordingURL: URL?
+    /// 录完一段后要弹的「已保存」提示，看一眼就会被清掉
+    @Published var savedAlert: SavedAlert?
     @Published private(set) var micAvailable = false
     @Published private(set) var selectedEffect: FaceEffect = .none
     @Published var statusMessage = "正在请求摄像头权限…"
@@ -164,17 +173,15 @@ final class CameraEngine: NSObject, ObservableObject {
 
     // MARK: 人脸追踪
 
-    /// 从没检测到脸时，图片默认盖在画面中间偏上的位置。
+    /// 图片层模式下未检测到人脸时仍贴在画面中间偏上的位置；无图片时不绘制。
     private static let fallbackFace = CGRect(x: 0.375, y: 0.52, width: 0.25, height: 0.25)
-    private var faceTracker = FaceTracker()
-    private var missedFrames = 0
+    private var faceTracker = MultiFaceTracker()
     private var lastFaceVisible = false
+    private var lastPublishedFaceCount = 0
     private var lastAppliedMirror = true
     /// 当前脸罩素材的面孔开口几何，载入时量一次。自定义图片没有开口，这里是 nil。
     /// 只用于预览上的调试框 —— 让「脸有没有落在开口里」一眼可见。
     private var overlayOpening: Compositor.OpeningGuide?
-    private var faceRoll: Double = 0
-    private var hasFaceRoll = false
     private var frameCounter = 0
     /// 默认每帧都检测；实测 Vision 太慢时自动降到每 2 帧一次
     private var detectEvery = 1
@@ -190,10 +197,6 @@ final class CameraEngine: NSObject, ObservableObject {
     private static let fastCostThreshold = 0.010
     private static let slowStreakFrames = 20
     private static let fastStreakFrames = 60
-
-    /// 歪头角度的平滑增益：静止 / 移动
-    private static let rollRestGain = 0.12
-    private static let rollMovingGain = 0.35
 
     // MARK: 录制
 
@@ -293,13 +296,10 @@ final class CameraEngine: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.isRunning = true
-            if self.overlayImage == nil {
-                self.statusMessage = "请先选择一张图片作为「脸罩」"
-            } else if self.micAvailable {
-                self.statusMessage = "准备就绪（画面 + 声音）"
-            } else {
-                self.statusMessage = "准备就绪（麦克风未授权，只录画面）"
-            }
+            // 就一句「准备就绪」。
+            // 没选脸罩是可选操作、不是待办事项，挂在底部像在催；
+            // 麦克风没授权在「声音」卡片里有专门的警告行，不需要在这里重复。
+            self.statusMessage = "准备就绪"
         }
     }
 
@@ -560,6 +560,7 @@ final class CameraEngine: NSObject, ObservableObject {
         sizeScale = CoverDefaults.defaultSizeScale(for: cover.kind)
         offsetX = CoverDefaults.offsetX
         offsetY = CoverDefaults.offsetY
+        statusMessage = "已经准备就绪"
     }
 
     /// 量一次素材的锚点，转成相对画布的比例。
@@ -589,7 +590,7 @@ final class CameraEngine: NSObject, ObservableObject {
         overlayImage = nil
         overlayOpening = nil
         if isRunning {
-            statusMessage = "已关闭脸罩特效"
+            statusMessage = "已关闭遮挡，可继续录制原画"
         }
     }
 
@@ -608,11 +609,8 @@ final class CameraEngine: NSObject, ObservableObject {
             statusMessage = "摄像头还没准备好，稍等一下再试"
             return
         }
-        guard overlayImage != nil else {
-            statusMessage = "先选一张图片当「脸罩」，不然挡住的是什么？"
-            return
-        }
-        guard !recordRequested else { return }
+        // 不强制要求有脸罩：没选图片就录原画。想要挡住脸才需要选一张。
+        guard !recordRequested, !isRecording else { return }
         let source = audioSource
         mixer.configure(useMicrophone: source == .both, useSystem: source == .both)
         recordRequested = true
@@ -656,6 +654,17 @@ final class CameraEngine: NSObject, ObservableObject {
                     if ok {
                         self.lastRecordingURL = url
                         self.statusMessage = "✅ 已保存 \(url?.lastPathComponent ?? "")"
+                        // 弹「已保存」提示框。文件大小要等 writer 关掉之后才读得准。
+                        let name = url?.lastPathComponent ?? ""
+                        let bytes = url.flatMap {
+                            (try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? Int) ?? nil
+                        } ?? 0
+                        self.savedAlert = SavedAlert(
+                            url: url ?? Self.outputDirectory,
+                            fileName: name,
+                            sizeText: ByteCountFormatter.string(fromByteCount: Int64(bytes),
+                                                                countStyle: .file)
+                        )
                     } else {
                         self.statusMessage = "❌ 保存失败：\(w.error?.localizedDescription ?? "未知错误")"
                     }
@@ -667,11 +676,6 @@ final class CameraEngine: NSObject, ObservableObject {
     func openOutputFolder() {
         try? FileManager.default.createDirectory(at: Self.outputDirectory, withIntermediateDirectories: true)
         NSWorkspace.shared.open(Self.outputDirectory)
-    }
-
-    func revealLastRecording() {
-        guard let url = lastRecordingURL else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     // MARK: - 写文件
@@ -820,7 +824,7 @@ final class CameraEngine: NSObject, ObservableObject {
 
     // MARK: - 人脸检测
 
-    private func detectLargestFace(in pixelBuffer: CVPixelBuffer) -> FaceMeasurement? {
+    private func detectFaces(in pixelBuffer: CVPixelBuffer) -> [FaceObservation]? {
         let request = VNDetectFaceRectanglesRequest()
         request.revision = VNDetectFaceRectanglesRequestRevision3
 
@@ -831,12 +835,9 @@ final class CameraEngine: NSObject, ObservableObject {
             return nil
         }
 
-        guard let face = (request.results ?? []).max(by: { a, b in
-            a.boundingBox.width * a.boundingBox.height < b.boundingBox.width * b.boundingBox.height
-        }) else { return nil }
-
-        return FaceMeasurement(boundingBox: face.boundingBox,
-                               roll: face.roll?.doubleValue ?? 0)
+        return Array((request.results ?? []).prefix(12)).map {
+            FaceObservation(boundingBox: $0.boundingBox, roll: $0.roll?.doubleValue ?? 0)
+        }
     }
 
     /// 按实测耗时决定「每几帧检测一次」。
@@ -845,6 +846,7 @@ final class CameraEngine: NSObject, ObservableObject {
     /// 会让 `detectEvery` 每帧翻转：一会儿每帧有检测、一会儿隔帧才有。
     /// 隔帧那一帧只能靠速度外推，遮罩的运动节奏于是变得不匀 —— 看起来就是「慌」。
     /// 所以降级和恢复用两个不同阈值，并且要连续若干帧确认才切换。
+    /// 多人脸检测耗时随人数增加，更容易撞上阈值，迟滞在这里更必要。
     private func updateDetectionCadence() {
         guard let cost = visionCost else { return }
 
@@ -867,61 +869,37 @@ final class CameraEngine: NSObject, ObservableObject {
         }
     }
 
-    private func updateFace(in pixelBuffer: CVPixelBuffer,
-                            settings s: SettingsSnapshot,
-                            at time: Double) {
-        guard s.trackingEnabled else {
-            // 关掉跟随时固定用兜底位置，让滑块手动挪
+    private func updateFaces(in pixelBuffer: CVPixelBuffer,
+                             settings s: SettingsSnapshot,
+                             at time: Double) -> [TrackedFace] {
+        guard s.image != nil, s.trackingEnabled else {
+            // 关闭跟随时不需要检测。使用自定义图片时保留单个居中手动位置。
             faceTracker.reset()
-            faceRoll = 0
-            hasFaceRoll = false
-            missedFrames = 0
-            if lastFaceVisible {
-                lastFaceVisible = false
-                DispatchQueue.main.async { [weak self] in self?.faceVisible = false }
-            }
-            return
+            setFaceVisible(false, count: 0)
+            return []
         }
 
-        // 逐帧检测。Vision 在 720p 上大约 5~10ms，33ms 的帧预算完全够。
-        // 万一某台机器吃力，下面会根据实测耗时自动降到每 2 帧一次。
-        var measurement: FaceMeasurement?
+        var observations: [FaceObservation]?
         if frameCounter % detectEvery == 0 {
             let started = CACurrentMediaTime()
-            measurement = detectLargestFace(in: pixelBuffer)
+            observations = detectFaces(in: pixelBuffer)
             let cost = CACurrentMediaTime() - started
             visionCost = visionCost.map { $0 * 0.9 + cost * 0.1 } ?? cost
             updateDetectionCadence()
-            if measurement != nil {
-                missedFrames = 0
-            } else {
-                missedFrames += 1
-            }
         }
 
-        faceTracker.update(measurement: measurement?.boundingBox, at: time)
+        let faces = faceTracker.update(observations: observations, at: time)
+        setFaceVisible(!faces.isEmpty, count: faces.count)
+        return faces
+    }
 
-        if let detectedRoll = measurement?.roll {
-            if hasFaceRoll {
-                // 歪头角度同样按「有多动」自适应。
-                // 静止时必须压得很狠：脸罩比脸大（sizeScale 约 2.5 倍），
-                // 外缘位移 = 半径 × 角度，一点点角度噪声就会让脸罩边缘明显摆动。
-                let gain = Self.rollRestGain
-                    + (Self.rollMovingGain - Self.rollRestGain) * faceTracker.motion
-                faceRoll += (detectedRoll - faceRoll) * gain
-            } else {
-                faceRoll = detectedRoll
-                hasFaceRoll = true
-            }
-        }
-
-        // 只有真正「新鲜」的检测结果才算可见
-        let fresh = measurement != nil || (missedFrames > 0 && missedFrames < 3)
-        if fresh != lastFaceVisible {
-            lastFaceVisible = fresh
-            DispatchQueue.main.async { [weak self] in
-                self?.faceVisible = fresh
-            }
+    private func setFaceVisible(_ visible: Bool, count: Int) {
+        guard visible != lastFaceVisible || count != lastPublishedFaceCount else { return }
+        lastFaceVisible = visible
+        lastPublishedFaceCount = count
+        DispatchQueue.main.async { [weak self] in
+            self?.faceVisible = visible
+            self?.trackedFaceCount = count
         }
     }
 
@@ -943,34 +921,37 @@ final class CameraEngine: NSObject, ObservableObject {
 
         frameCounter &+= 1
 
-        // 换了镜像方向的话，上一帧的人脸坐标就不在同一个空间里了，丢掉重新跟
+        // 换镜像方向后所有脸都要重新关联，避免旧坐标对应到错误的人。
         if s.mirror != lastAppliedMirror {
             lastAppliedMirror = s.mirror
             faceTracker.reset()
-            missedFrames = 0
-            faceRoll = 0
-            hasFaceRoll = false
         }
 
-        // 顺序很重要：先定画面方向 → 再在这个画面上检测人脸 → 再把脸罩贴上去。
-        // 检测和贴图在同一个坐标空间里，遮罩不可能跟脸走反。
+        // 顺序很重要：先定画面方向 → 再检测并匹配多人脸 → 再逐脸贴图。
         Compositor.mirrorIfNeeded(pixelBuffer, mirror: s.mirror)
         let time = CMTimeGetSeconds(pts)
-        updateFace(in: pixelBuffer, settings: s, at: time)
-
-        let face = s.trackingEnabled
-            ? (faceTracker.predicted ?? Self.fallbackFace)
-            : Self.fallbackFace
-        logFaceDiagnostic(face: face, time: time)
+        let faces = updateFaces(in: pixelBuffer, settings: s, at: time)
+        logFaceDiagnostic(faces: faces, time: time)
 
         if let overlay = s.image {
-            Compositor.drawOverlay(overlay: overlay,
-                                   into: pixelBuffer,
-                                   faceNormalized: face,
-                                   sizeScale: s.sizeScale,
-                                   offsetX: s.offsetX,
-                                   offsetY: s.offsetY,
-                                   rotationRadians: faceRoll)
+            if s.trackingEnabled {
+                for face in faces {
+                    Compositor.drawOverlay(overlay: overlay,
+                                           into: pixelBuffer,
+                                           faceNormalized: face.boundingBox,
+                                           sizeScale: s.sizeScale,
+                                           offsetX: s.offsetX,
+                                           offsetY: s.offsetY,
+                                           rotationRadians: face.roll)
+                }
+            } else {
+                Compositor.drawOverlay(overlay: overlay,
+                                       into: pixelBuffer,
+                                       faceNormalized: Self.fallbackFace,
+                                       sizeScale: s.sizeScale,
+                                       offsetX: s.offsetX,
+                                       offsetY: s.offsetY)
+            }
         }
 
         // 录制必须在画调试框之前 —— 调试框只能出现在预览里，绝不能进视频文件
@@ -989,13 +970,15 @@ final class CameraEngine: NSObject, ObservableObject {
 
         // 调试框只画在预览上，不参与录制
         if s.showDebugBox {
-            Compositor.drawDebugBox(into: pixelBuffer,
-                                    faceNormalized: face,
-                                    overlay: s.image,
-                                    opening: overlayOpening,
-                                    sizeScale: s.sizeScale,
-                                    offsetX: s.offsetX,
-                                    offsetY: s.offsetY)
+            for face in faces {
+                Compositor.drawDebugBox(into: pixelBuffer,
+                                        faceNormalized: face.boundingBox,
+                                        overlay: s.image,
+                                        opening: overlayOpening,
+                                        sizeScale: s.sizeScale,
+                                        offsetX: s.offsetX,
+                                        offsetY: s.offsetY)
+            }
         }
 
         publishPreview(from: pixelBuffer)
@@ -1005,21 +988,39 @@ final class CameraEngine: NSObject, ObservableObject {
     ///
     /// 原来只记了 x，所以「位置不对」这类问题只能靠猜。现在把 y、脸框尺寸、
     /// 贴图缩放都记下来 —— 出问题时对着这行数字就能算出贴图到底落在哪。
-    private func logFaceDiagnostic(face: CGRect, time: Double) {
+    /// 多人脸时先记总人数和每个人的横向位置，再记「主脸」（第一张）的完整信息，
+    /// 单人场景下这一行就是全部。
+    private func logFaceDiagnostic(faces: [TrackedFace], time: Double) {
         guard time - lastFaceLogTime >= 1.0 else { return }
         lastFaceLogTime = time
         let s = currentSettings()
-        // 贴图中心 = 人脸中心 + 偏移（偏移量的单位是脸宽 / 脸高）
-        let overlayX = face.midX + CGFloat(s.offsetX) * face.width
-        let overlayY = face.midY - CGFloat(s.offsetY) * face.height
-        writeDiagnostic(String(
-            format: "人脸中心=(%.3f,%.3f) 脸框=%.3f×%.3f | 贴图中心=(%.3f,%.3f) 缩放=%.2f×脸宽 | 镜像=%@ | 逐帧检测=%@ | 已追踪=%@",
-            face.midX, face.midY, face.width, face.height,
-            overlayX, overlayY, s.sizeScale,
-            s.mirror ? "开" : "关",
-            detectEvery == 1 ? "是" : "否",
-            faceTracker.predicted == nil ? "否" : "是"
-        ))
+        let centers = faces.map { String(format: "#%d:x=%.3f", $0.id, $0.boundingBox.midX) }
+            .joined(separator: ",")
+
+        var primary = ""
+        if let face = faces.first?.boundingBox {
+            // 贴图中心 = 人脸中心 + 偏移（偏移量的单位是脸宽 / 脸高）
+            let overlayX = face.midX + CGFloat(s.offsetX) * face.width
+            let overlayY = face.midY - CGFloat(s.offsetY) * face.height
+            primary = String(format: " | 主脸中心=(%.3f,%.3f) 脸框=%.3f×%.3f 贴图中心=(%.3f,%.3f) 缩放=%.2f×脸宽",
+                             face.midX, face.midY, face.width, face.height,
+                             overlayX, overlayY, s.sizeScale)
+        }
+
+        // 「0 张脸」和「根本没检测」是两回事，诊断文件里必须能分开 ——
+        // 没选脸罩时 `updateFaces` 会直接跳过检测（省 CPU），这时恒为 0 张脸，
+        // 不写清楚的话看日志的人会以为人脸检测坏了。
+        let state: String
+        if s.image == nil {
+            state = "未检测（未选脸罩）"
+        } else if !s.trackingEnabled {
+            state = "未检测（已关闭跟随）"
+        } else {
+            state = "\(faces.count) 张"
+        }
+
+        writeDiagnostic("人脸=\(state) [\(centers)]\(primary)"
+                        + " | 镜像=\(s.mirror ? "开" : "关") | 检测间隔=\(detectEvery)帧")
     }
 
     private func handleAudio(_ sampleBuffer: CMSampleBuffer) {

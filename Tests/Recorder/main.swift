@@ -142,6 +142,28 @@ func isMagenta(_ p: (r: Int, g: Int, b: Int)) -> Bool { p.r > 150 && p.b > 150 &
 
 let overlay = makeOverlay()
 
+print("\n[0] 无遮挡素材也可以创建并完成原画录制")
+do {
+    let url = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("facecover-original-selftest-\(UUID().uuidString).mov")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let firstPTS = CMTime(seconds: 12345.0, preferredTimescale: 600)
+    let components = try Recorder.makeComponents(url: url, width: 640, height: 480,
+                                                 audioChannels: nil, startPTS: firstPTS)
+    guard let pool = components.adaptor.pixelBufferPool else { fatalError("原画录制缓冲池不可用") }
+    var pixelBuffer: CVPixelBuffer?
+    guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pixelBuffer) == kCVReturnSuccess,
+          let pixelBuffer else { fatalError("无法创建原画录制帧") }
+    fillCameraFrame(pixelBuffer)
+    check(components.adaptor.append(pixelBuffer, withPresentationTime: firstPTS),
+          "不使用任何遮挡图片时原始帧能写进录制文件")
+    components.videoInput.markAsFinished()
+    let semaphore = DispatchSemaphore(value: 0)
+    components.writer.finishWriting { semaphore.signal() }
+    _ = semaphore.wait(timeout: .now() + 30)
+    check(components.writer.status == .completed, "无遮挡原画文件正常收尾（\(components.writer.status.rawValue)）")
+}
+
 // 模拟人脸在「摄像头原始画面」里的位置：横向 0.15..0.35
 let rawFace = CGRect(x: 0.15, y: 0.4, width: 0.2, height: 0.2)
 

@@ -56,6 +56,12 @@ final class RecordingLibrary: ObservableObject {
     @Published private(set) var isScanning = false
     @Published var errorMessage: String?
 
+    /// 刚录完要定位并高亮的那一段。设上之后列表会滚动过去，并给一个「低调的高亮」。
+    @Published var highlightURL: URL?
+    /// 高亮是否已经落定 —— 刚到位时亮一下，随后收成几乎看不出的底色，不抢注意力。
+    @Published private(set) var highlightSettled = false
+    private var highlightSettleTimer: DispatchWorkItem?
+
     /// 缩略图缓存，按文件修改时间失效
     private var thumbnailCache: [URL: (modified: Date, image: CGImage)] = [:]
     private var metadataQueue = DispatchQueue(label: "com.local.facecover.library", qos: .utility)
@@ -234,5 +240,30 @@ final class RecordingLibrary: ObservableObject {
 
     func openFolder() {
         NSWorkspace.shared.open(directory)
+    }
+
+    /// 定位到这一段：滚动过去 + 高亮。
+    ///
+    /// 高亮做成「先亮一下再收成低调底色」，因为要定位的是**刚录完的那一段**，
+    /// 用户本来就盯着看，一直强高亮反而吵。
+    func highlight(_ url: URL) {
+        highlightSettleTimer?.cancel()
+        highlightURL = url
+        highlightSettled = false
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.highlightURL == url else { return }
+            self.highlightSettled = true
+        }
+        highlightSettleTimer = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4, execute: work)
+    }
+
+    /// 清掉高亮。用户主动点了别处、或者列表刷新之后就调用。
+    func clearHighlight() {
+        highlightSettleTimer?.cancel()
+        highlightSettleTimer = nil
+        highlightURL = nil
+        highlightSettled = false
     }
 }

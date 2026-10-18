@@ -102,7 +102,7 @@ struct ContentView: View {
             return String(format: "录制中 %02d:%02d", minutes, seconds)
         }
         if engine.overlayImage == nil { return "还没有脸罩" }
-        return engine.faceVisible ? "已锁定人脸" : "未检测到人脸"
+        return engine.faceVisible ? "已准备好了" : "未检测到人脸"
     }
 
     // MARK: - 侧边栏
@@ -420,12 +420,6 @@ struct ContentView: View {
                 Toggle("自动跟随人脸", isOn: $engine.trackingEnabled)
                     .toggleStyle(.switch)
                     .controlSize(.small)
-                Text(engine.trackingEnabled
-                     ? "Vision 实时检测人脸，脸罩自动贴上去。"
-                     : "已关闭跟随，脸罩固定在画面中间，用下面的滑块挪到脸上。")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -444,11 +438,6 @@ struct ContentView: View {
                           range: -2.0...2.0,
                           defaultValue: CoverDefaults.offsetY) { Self.signed($0) }
             }
-
-            Text("大小是脸罩宽度相对脸宽的倍数；左右 / 上下是相对脸的位置微调，上下正值向下。")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -474,9 +463,7 @@ struct ContentView: View {
 
     private var viewCard: some View {
         card("画面", systemImage: "rectangle.on.rectangle") {
-            toggleRow("画面镜像",
-                      subtitle: "像照镜子一样左右翻转整帧。脸罩图片本身不会被翻过来，带文字的表情包不会变成镜像字。",
-                      isOn: $engine.mirror)
+            toggleRow("画面镜像", isOn: $engine.mirror)
 
             toggleRow("显示人脸检测框",
                       subtitle: "在预览上画出检测到的人脸位置，只画在预览里，不会进视频。",
@@ -485,16 +472,18 @@ struct ContentView: View {
     }
 
     private func toggleRow(_ title: String,
-                           subtitle: String,
+                           subtitle: String? = nil,
                            isOn: Binding<Bool>) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Toggle(title, isOn: isOn)
                 .toggleStyle(.switch)
                 .controlSize(.small)
-            Text(subtitle)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if let subtitle {
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

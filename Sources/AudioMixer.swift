@@ -66,6 +66,22 @@ final class AudioMixer {
         lock.unlock()
     }
 
+    /// 暂停结束、继续喂数据之前调用。
+    ///
+    /// `drainLocked` 用「距上次收到数据多久」判断某一路是不是哑了。暂停期间
+    /// 一个样本都没进来，这个差值会被拉得很大，恢复后第一块就会误判成
+    /// 「另一路已经哑了」，于是只拿先到的那一路混音，丢掉另一路同一时间段的
+    /// 样本。把三个时间基准拨到恢复时刻，判定就回到正常节奏。
+    ///
+    /// FIFO 里的残留不清 —— 那是暂停之前录到的有效声音。
+    func markResumed(at time: Double) {
+        lock.lock()
+        defer { lock.unlock() }
+        if lastMicrophoneTime.isFinite { lastMicrophoneTime = time }
+        if lastSystemTime.isFinite { lastSystemTime = time }
+        if firstAppendTime != nil { firstAppendTime = time }
+    }
+
     /// 录音结束时把 FIFO 里剩下的凑不满一整块的也吐出去，免得结尾丢音。
     func flush() {
         lock.lock()
@@ -236,6 +252,51 @@ enum PCMConverter {
             formatDescriptionOut: &description
         )
         return status == noErr ? description : nil
+    }
+
+    /// 把 sampleBuffer 里所有时间戳整体往前挪 `offset`（暂停补偿用）。
+    ///
+    /// 直通模式下音频是直接把采集回调给的 buffer 交给 writer 的，PTS 是真实采集时刻。
+    /// 暂停过后这些时刻整体落后于文件时间线，不挪的话 writer 会当成「时间倒退」拒收。
+    /// 平移量是 0 时原样返回，不白拷贝一次。
+    static func shiftedTiming(_ sampleBuffer: CMSampleBuffer, by offset: CMTime) -> CMSampleBuffer? {
+        guard CMTimeCompare(offset, .zero) != 0 else { return sampleBuffer }
+
+        var entryCount: CMItemCount = 0
+        guard CMSampleBufferGetSampleTimingInfoArray(sampleBuffer,
+                                                     entryCount: 0,
+                                                     arrayToFill: nil,
+                                                     entriesNeededOut: &entryCount) == noErr,
+              entryCount > 0 else { return nil }
+
+        var timings = [CMSampleTimingInfo](repeating: CMSampleTimingInfo(),
+                                           count: Int(entryCount))
+        guard CMSampleBufferGetSampleTimingInfoArray(sampleBuffer,
+                                                     entryCount: entryCount,
+                                                     arrayToFill: &timings,
+                                                     entriesNeededOut: nil) == noErr else { return nil }
+
+        for index in timings.indices {
+            timings[index].presentationTimeStamp = CMTimeSubtract(
+                timings[index].presentationTimeStamp, offset
+            )
+            if timings[index].decodeTimeStamp.isValid {
+                timings[index].decodeTimeStamp = CMTimeSubtract(
+                    timings[index].decodeTimeStamp, offset
+                )
+            }
+        }
+
+        var shifted: CMSampleBuffer?
+        let status = timings.withUnsafeBufferPointer { buffer in
+            CMSampleBufferCreateCopyWithNewTiming(allocator: kCFAllocatorDefault,
+                                                  sampleBuffer: sampleBuffer,
+                                                  sampleTimingEntryCount: entryCount,
+                                                  sampleTimingArray: buffer.baseAddress,
+                                                  sampleBufferOut: &shifted)
+        }
+        guard status == noErr else { return nil }
+        return shifted
     }
 
     /// 把 Int16 交错样本包成 CMSampleBuffer，才能喂给 AVAssetWriterInput

@@ -65,6 +65,12 @@ final class CameraEngine: NSObject, ObservableObject {
 
     @Published private(set) var isRunning = false
     @Published private(set) var isRecording = false
+    /// 录制中按了暂停：采集和预览照常，但一帧都不写文件
+    @Published private(set) var isPaused = false
+    /// 本次暂停开始的时刻，用来让界面上的计时器冻住
+    @Published private(set) var pausedAt: Date?
+    /// 本次录制累计暂停了多久，计时器要把它扣掉
+    @Published private(set) var pausedSeconds: TimeInterval = 0
     @Published private(set) var recordingStartedAt: Date?
     @Published private(set) var faceVisible = false
     @Published private(set) var trackedFaceCount = 0
@@ -209,6 +215,10 @@ final class CameraEngine: NSObject, ObservableObject {
     private var sessionStarted = false
     /// 上一帧真正写进文件的时间戳。抽帧（按目标帧率丢掉多余帧）要用它算间隔
     private var lastAppendedVideoPTS: CMTime?
+
+    /// 暂停补偿。视频线程和音频线程都要读，主线程会写，所以单独上锁。
+    private let timelineLock = NSLock()
+    private var timeline = RecordingTimeline()
 
     // 音频
     private let mixer = AudioMixer()
@@ -605,6 +615,101 @@ final class CameraEngine: NSObject, ObservableObject {
         }
     }
 
+    // MARK: 暂停 / 继续
+
+    /// 暂停或继续。没在录制时点它什么也不做。
+    func togglePause() {
+        if isPaused {
+            resumeRecording()
+        } else {
+            pauseRecording()
+        }
+    }
+
+    /// 暂停：采集和预览照常跑，只是不再往文件里写帧。
+    ///
+    /// 之所以不直接停采集，是因为恢复时要重新配置会话，中间会黑屏一下；
+    /// 而且暂停时长要靠时间戳补偿，采集一直跑着反而更好算。
+    func pauseRecording() {
+        guard isRecording, !isPaused else { return }
+
+        // 视频帧和音频的 PTS 都在 host clock 上，用同一个时钟记暂停时刻，
+        // 两路的补偿量才一致，音画不会因为暂停而错位。
+        timelineLock.lock()
+        timeline.pause(at: CMClockGetTime(CMClockGetHostTimeClock()))
+        timelineLock.unlock()
+
+        pausedAt = Date()
+        isPaused = true
+        statusMessage = "已暂停"
+    }
+
+    /// 继续录制：把暂停时长记进时间线，后面的帧接着暂停前那一帧往下写。
+    func resumeRecording() {
+        guard isPaused else { return }
+
+        timelineLock.lock()
+        timeline.resume(at: CMClockGetTime(CMClockGetHostTimeClock()))
+        timelineLock.unlock()
+
+        if let began = pausedAt {
+            pausedSeconds += Date().timeIntervalSince(began)
+        }
+        pausedAt = nil
+        isPaused = false
+
+        // 暂停期间 mixer 一个样本都没收到。不重置它的静音计时，恢复后第一块
+        // 会被判成「另一路已经哑了」，于是只用一路混音，丢掉另一路同一时间段的样本。
+        if currentSettings().audioSource == .both {
+            let now = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))
+            mixer.markResumed(at: now)
+        }
+        statusMessage = "正在录制"
+    }
+
+    /// 已经录进文件的时长（不含暂停）。界面上的计时器用它，暂停时会冻住。
+    func recordedDuration(at now: Date = Date()) -> TimeInterval {
+        guard let startedAt = recordingStartedAt else { return 0 }
+        let reference = pausedAt ?? now
+        return max(0, reference.timeIntervalSince(startedAt) - pausedSeconds)
+    }
+
+    /// 暂停中就不该往文件里写东西。视频线程和音频线程都读这个，
+    /// 不能直接读 `isPaused` —— 那是给界面用的，只在主线程改。
+    private var isWritePaused: Bool {
+        timelineLock.lock()
+        defer { timelineLock.unlock() }
+        return timeline.isPaused
+    }
+
+    /// 采集时间戳 → 文件时间戳（扣掉累计暂停时长）
+    private func outputTime(_ pts: CMTime) -> CMTime {
+        timelineLock.lock()
+        defer { timelineLock.unlock() }
+        return timeline.map(pts)
+    }
+
+    /// 当前累计暂停了多久，直通音频平移 PTS 要用
+    private func pauseOffset() -> CMTime {
+        timelineLock.lock()
+        defer { timelineLock.unlock() }
+        return timeline.pausedDuration
+    }
+
+    private func resetTimeline() {
+        timelineLock.lock()
+        timeline.reset()
+        timelineLock.unlock()
+    }
+
+    /// 收尾时把暂停相关的界面状态清干净，免得下一段录像的计时器从负数开始
+    private func clearPauseState() {
+        isPaused = false
+        pausedAt = nil
+        pausedSeconds = 0
+        resetTimeline()
+    }
+
     func startRecording() {
         guard isRunning else {
             statusMessage = "摄像头还没准备好，稍等一下再试"
@@ -614,6 +719,8 @@ final class CameraEngine: NSObject, ObservableObject {
         guard !recordRequested, !isRecording else { return }
         let source = audioSource
         mixer.configure(useMicrophone: source == .both, useSystem: source == .both)
+        // 上一段的暂停时长绝不能带到这一段
+        clearPauseState()
         recordRequested = true
         statusMessage = "正在开始录制…"
     }
@@ -642,6 +749,7 @@ final class CameraEngine: NSObject, ObservableObject {
                 DispatchQueue.main.async {
                     self.isRecording = false
                     self.recordingStartedAt = nil
+                    self.clearPauseState()
                     self.statusMessage = "已取消录制"
                 }
                 return
@@ -652,6 +760,7 @@ final class CameraEngine: NSObject, ObservableObject {
                 DispatchQueue.main.async {
                     self.isRecording = false
                     self.recordingStartedAt = nil
+                    self.clearPauseState()
                     if ok {
                         self.lastRecordingURL = url
                         self.statusMessage = "✅ 已保存 \(url?.lastPathComponent ?? "")"
@@ -721,7 +830,7 @@ final class CameraEngine: NSObject, ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 self?.recordingStartedAt = Date()
                 self?.isRecording = true
-                self?.statusMessage = "● 正在录制…"
+                self?.statusMessage = "正在录制"
             }
         } catch {
             recordRequested = false
@@ -761,8 +870,17 @@ final class CameraEngine: NSObject, ObservableObject {
     ///    不裁剪直接缩放会拉伸画面。
     private func appendFrame(_ source: CVPixelBuffer, at pts: CMTime, frameRate: Int) {
         let minimumInterval = 1.0 / Double(max(frameRate, 1))
+
+        // 恢复后的第一帧可能落在上一帧之前 —— 暂停/恢复的指令时刻和这一帧的
+        // 采集时刻差着几毫秒。writer 不接受时间倒退，往前顶一个帧间隔。
+        var writePTS = pts
+        if let lastPTS = lastAppendedVideoPTS, CMTimeCompare(writePTS, lastPTS) <= 0 {
+            writePTS = CMTimeAdd(lastPTS,
+                                 CMTime(value: 1, timescale: CMTimeScale(max(frameRate, 1))))
+        }
+
         if let lastPTS = lastAppendedVideoPTS,
-           CMTimeGetSeconds(CMTimeSubtract(pts, lastPTS)) + 0.000_001 < minimumInterval {
+           CMTimeGetSeconds(CMTimeSubtract(writePTS, lastPTS)) + 0.000_001 < minimumInterval {
             return
         }
 
@@ -818,8 +936,8 @@ final class CameraEngine: NSObject, ObservableObject {
                              colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
         }
 
-        if adaptor.append(destination, withPresentationTime: pts) {
-            lastAppendedVideoPTS = pts
+        if adaptor.append(destination, withPresentationTime: writePTS) {
+            lastAppendedVideoPTS = writePTS
         }
     }
 
@@ -955,8 +1073,9 @@ final class CameraEngine: NSObject, ObservableObject {
             }
         }
 
-        // 录制必须在画调试框之前 —— 调试框只能出现在预览里，绝不能进视频文件
-        if recordRequested {
+        // 录制必须在画调试框之前 —— 调试框只能出现在预览里，绝不能进视频文件。
+        // 暂停期间这一帧直接丢：采集和预览照常跑，文件里不留痕迹。
+        if recordRequested && !isWritePaused {
             writerLock.lock()
             let started = sessionStarted
             writerLock.unlock()
@@ -966,7 +1085,8 @@ final class CameraEngine: NSObject, ObservableObject {
                             height: CVPixelBufferGetHeight(pixelBuffer),
                             at: pts)
             }
-            appendFrame(pixelBuffer, at: pts, frameRate: s.recordingFrameRate.rawValue)
+            // 写文件用的时间戳要扣掉累计暂停时长，否则暂停那段时间会变成一段静止画面
+            appendFrame(pixelBuffer, at: outputTime(pts), frameRate: s.recordingFrameRate.rawValue)
         }
 
         // 调试框只画在预览上，不参与录制
@@ -1025,6 +1145,10 @@ final class CameraEngine: NSObject, ObservableObject {
     }
 
     private func handleAudio(_ sampleBuffer: CMSampleBuffer) {
+        // 暂停期间的声音同样不该进文件。混音模式下直接不喂 mixer，
+        // 它内部的 frameOffset 就不会增长，恢复后音频时间线自然接得上。
+        guard !isWritePaused else { return }
+
         let s = currentSettings()
         let time = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
 
@@ -1044,6 +1168,8 @@ final class CameraEngine: NSObject, ObservableObject {
 
     /// 系统声音回调（ScreenCaptureKit 的队列）
     private func handleSystemAudio(_ sampleBuffer: CMSampleBuffer) {
+        guard !isWritePaused else { return }
+
         let s = currentSettings()
         let time = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         switch s.audioSource {
@@ -1063,7 +1189,10 @@ final class CameraEngine: NSObject, ObservableObject {
         writerLock.unlock()
 
         guard started, let input, input.isReadyForMoreMediaData else { return }
-        input.append(sampleBuffer)
+        // 直通音频的 PTS 是真实采集时刻，暂停过后要整体往前挪，接上文件时间线。
+        // 混音那条路不用挪 —— 它的时间戳是从已写样本数算出来的，天然连续。
+        guard let shifted = PCMConverter.shiftedTiming(sampleBuffer, by: pauseOffset()) else { return }
+        input.append(shifted)
     }
 
     /// 混音器吐出来的块，自己包成 CMSampleBuffer 再写进文件

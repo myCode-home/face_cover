@@ -286,6 +286,137 @@ do {
     check(isBlue(sample(frame, 20, 100)), "左边原来的标记位置变成背景 x=20")
 }
 
+// MARK: 场景三：暂停
+
+print("\n[3] 暂停时间线：扣掉暂停时长，别把静止画面录进去")
+do {
+    var timeline = RecordingTimeline()
+    let t0 = CMTime(seconds: 1000, preferredTimescale: 600)
+    check(CMTimeCompare(timeline.map(t0), t0) == 0, "没暂停过时时间戳原样透传")
+    check(!timeline.isPaused, "初始不是暂停状态")
+
+    timeline.pause(at: CMTime(seconds: 1002, preferredTimescale: 600))
+    check(timeline.isPaused, "调用 pause 后进入暂停")
+    // 重复 pause 不能把起点往后挪，否则暂停时长会被算短
+    timeline.pause(at: CMTime(seconds: 1005, preferredTimescale: 600))
+
+    let span = timeline.resume(at: CMTime(seconds: 1007, preferredTimescale: 600))
+    check(abs(CMTimeGetSeconds(span) - 5) < 0.001,
+          "重复暂停不叠加：从 1002 算到 1007，共 \(CMTimeGetSeconds(span)) 秒")
+    check(!timeline.isPaused, "恢复后退出暂停")
+
+    let mapped = timeline.map(CMTime(seconds: 1008, preferredTimescale: 600))
+    check(abs(CMTimeGetSeconds(mapped) - 1003) < 0.001,
+          "恢复后的时间戳往前挪 5 秒（\(CMTimeGetSeconds(mapped))）")
+
+    timeline.resume(at: CMTime(seconds: 1010, preferredTimescale: 600))
+    check(abs(CMTimeGetSeconds(timeline.pausedDuration) - 5) < 0.001,
+          "没在暂停时再 resume 不会重复扣时长")
+
+    timeline.reset()
+    check(CMTimeCompare(timeline.pausedDuration, .zero) == 0, "reset 清掉累计暂停（下一段录像不继承）")
+}
+
+/// 纯色填充，用来区分「暂停前」和「暂停后」的画面
+func fillSolid(_ buffer: CVPixelBuffer, _ r: CGFloat, _ g: CGFloat, _ b: CGFloat) {
+    CVPixelBufferLockBaseAddress(buffer, [])
+    defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+    guard let base = CVPixelBufferGetBaseAddress(buffer),
+          let ctx = CGContext(data: base,
+                              width: CVPixelBufferGetWidth(buffer),
+                              height: CVPixelBufferGetHeight(buffer),
+                              bitsPerComponent: 8,
+                              bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                              space: srgb,
+                              bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
+                                        | CGBitmapInfo.byteOrder32Little.rawValue) else { return }
+    ctx.setFillColor(color(r, g, b))
+    ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
+}
+
+/// 录一段「中途暂停 2 秒」的片子：前 1 秒蓝、后 1 秒绿。
+///
+/// 暂停期间一帧都不写，采集时间戳照常往前走；靠 `RecordingTimeline` 把
+/// 暂停时长扣掉，文件时间线才应该是 2 秒。不做补偿的话这里会是 4 秒。
+func recordWithPause() throws -> URL {
+    let url = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("facecover-pause-selftest-\(UUID().uuidString).mov")
+
+    let firstPTS = CMTime(seconds: 4321.0, preferredTimescale: 600)
+    let components = try Recorder.makeComponents(url: url, width: W, height: H,
+                                                 audioChannels: nil, startPTS: firstPTS)
+    guard let pool = components.adaptor.pixelBufferPool else {
+        fatalError("拿不到 pixelBufferPool")
+    }
+
+    func writeFrame(at pts: CMTime, red: CGFloat, green: CGFloat, blue: CGFloat) {
+        var waited = 0
+        while !components.videoInput.isReadyForMoreMediaData && waited < 1000 {
+            usleep(2000)
+            waited += 1
+        }
+        guard components.videoInput.isReadyForMoreMediaData else { return }
+
+        var buffer: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer) == kCVReturnSuccess,
+              let pixelBuffer = buffer else { return }
+        fillSolid(pixelBuffer, red, green, blue)
+        _ = components.adaptor.append(pixelBuffer, withPresentationTime: pts)
+    }
+
+    var timeline = RecordingTimeline()
+
+    // 前 30 帧：蓝
+    for frame in 0..<30 {
+        let raw = CMTimeAdd(firstPTS, CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(FPS)))
+        writeFrame(at: timeline.map(raw), red: 0, green: 0, blue: 1)
+    }
+
+    // 暂停 2 秒：这段时间的采集帧直接丢掉，一个都不写
+    let pauseAt = CMTimeAdd(firstPTS, CMTime(seconds: 1.0, preferredTimescale: 600))
+    timeline.pause(at: pauseAt)
+    let resumeAt = CMTimeAdd(firstPTS, CMTime(seconds: 3.0, preferredTimescale: 600))
+    timeline.resume(at: resumeAt)
+
+    // 后 30 帧：绿。采集时间戳从 +3 秒起，映射后应该从 +1 秒接上
+    for frame in 0..<30 {
+        let raw = CMTimeAdd(resumeAt, CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(FPS)))
+        writeFrame(at: timeline.map(raw), red: 0, green: 1, blue: 0)
+    }
+
+    components.videoInput.markAsFinished()
+    let semaphore = DispatchSemaphore(value: 0)
+    components.writer.finishWriting { semaphore.signal() }
+    _ = semaphore.wait(timeout: .now() + 30)
+
+    guard components.writer.status == .completed else {
+        throw Recorder.failure("writer 收尾失败：\(String(describing: components.writer.error))")
+    }
+    return url
+}
+
+print("\n[4] 暂停端到端：文件里不能有暂停那段")
+do {
+    let url = try recordWithPause()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let asset = AVURLAsset(url: url)
+    let durationSeconds = awaitValue { try await asset.load(.duration) }.map(CMTimeGetSeconds) ?? 0
+    check(abs(durationSeconds - 2.0) < 0.25,
+          "时长 \(String(format: "%.2f", durationSeconds)) 秒（暂停 2 秒被扣掉，不是 4 秒）")
+
+    if let before = decodeFrame(url, atSeconds: 0.5) {
+        check(isBlue(sample(before, 640, 360)), "暂停前 0.5 秒还是蓝色画面")
+    } else {
+        check(false, "0.5 秒处解不出画面")
+    }
+    if let after = decodeFrame(url, atSeconds: 1.5) {
+        check(isGreen(sample(after, 640, 360)), "恢复后 1.5 秒已经是绿色画面（时间线接上了）")
+    } else {
+        check(false, "1.5 秒处解不出画面")
+    }
+}
+
 print("")
 if failures == 0 {
     print("全部通过 ✅  —— 导出的视频里脸确实被盖住了，镜像方向也对")

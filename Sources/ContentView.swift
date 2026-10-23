@@ -100,17 +100,20 @@ struct ContentView: View {
     }
 
     private var indicatorColor: Color {
+        if engine.isPaused { return .orange }
         if engine.isRecording { return .red }
         if engine.overlayImage == nil { return .secondary }
         return engine.faceVisible ? .green : .orange
     }
 
     private func indicatorText(at now: Date) -> String {
-        if engine.isRecording, let startedAt = engine.recordingStartedAt {
-            let elapsed = max(0, Int(now.timeIntervalSince(startedAt)))
+        if engine.isRecording {
+            // 用「已录进文件的时长」而不是「距开始多久」—— 暂停时要冻住
+            let elapsed = Int(engine.recordedDuration(at: now))
             let minutes = elapsed / 60
             let seconds = elapsed % 60
-            return String(format: "录制中 %02d:%02d", minutes, seconds)
+            return String(format: engine.isPaused ? "已暂停 %02d:%02d" : "录制中 %02d:%02d",
+                          minutes, seconds)
         }
         // 没选脸罩时不写「未选脸罩」—— 那是可选操作，用中性的模式名就行
         if engine.overlayImage == nil { return "原画模式" }
@@ -642,25 +645,44 @@ struct ContentView: View {
 
     private var recordBar: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Button {
-                engine.toggleRecording()
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: engine.isRecording ? "stop.circle.fill" : "record.circle")
-                        .font(.system(size: 14))
-                    Text(engine.isRecording ? "停止录制" : "开始录制").bold()
-                    Spacer(minLength: 6)
-                    Text("⌘↩")
-                        .font(.caption.monospacedDigit())
-                        .opacity(0.65)
+            HStack(spacing: 8) {
+                Button {
+                    engine.toggleRecording()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: engine.isRecording ? "stop.circle.fill" : "record.circle")
+                            .font(.system(size: 14))
+                        Text(engine.isRecording ? "停止录制" : "开始录制").bold()
+                        Spacer(minLength: 6)
+                        Text("⌘↩")
+                            .font(.caption.monospacedDigit())
+                            .opacity(0.65)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 5)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 5)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(engine.isRecording ? .red : .accentColor)
+                .keyboardShortcut(.return, modifiers: [.command])
+
+                // 暂停只在录制中有意义，平时不占位置
+                if engine.isRecording {
+                    Button {
+                        engine.togglePause()
+                    } label: {
+                        Image(systemName: engine.isPaused ? "play.fill" : "pause.fill")
+                            .font(.system(size: 14))
+                            .frame(width: 22)
+                            .padding(.vertical, 5)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .tint(engine.isPaused ? .accentColor : .orange)
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                    .help(engine.isPaused ? "继续录制（⇧⌘P）" : "暂停录制（⇧⌘P）")
+                }
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .tint(engine.isRecording ? .red : .accentColor)
-            .keyboardShortcut(.return, modifiers: [.command])
 
             HStack(alignment: .top, spacing: 6) {
                 Circle()
@@ -680,6 +702,7 @@ struct ContentView: View {
     }
 
     private var statusTint: Color {
+        if engine.isPaused { return .orange }
         if engine.isRecording { return .red }
         if engine.statusMessage.hasPrefix("❌") { return .orange }
         if engine.statusMessage.hasPrefix("✅") { return .green }

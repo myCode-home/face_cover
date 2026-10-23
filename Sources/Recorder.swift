@@ -94,6 +94,55 @@ enum RecordingQuality: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
+/// 录制时间线：把「采集时间戳」映射成「文件里的时间戳」。
+///
+/// 暂停期间采集照常跑，但一帧都不写文件。如果恢复后继续拿采集时间戳写文件，
+/// 新帧和暂停前最后一帧之间会隔着一大段空白 —— 视频时长里就凭空多出这段
+/// 「画面不动」的时间。所以暂停/恢复各记一个时刻，把累计暂停时长从采集
+/// 时间戳里扣掉，文件时间线才是连续的。
+///
+/// 时刻统一用 `CMClockGetHostTimeClock()`：摄像头帧和音频的 PTS 都在这个
+/// 时钟域里，一条时间线就能同时管两路，音画不会因为暂停而错位。
+struct RecordingTimeline {
+
+    /// 累计被扣掉的时长
+    private(set) var pausedDuration: CMTime = .zero
+    /// 暂停开始的时刻；非 nil 表示正处在暂停中
+    private(set) var pauseBeganAt: CMTime?
+
+    var isPaused: Bool { pauseBeganAt != nil }
+
+    /// 每段录像开始时清空，上一段的暂停不能带到下一段
+    mutating func reset() {
+        pausedDuration = .zero
+        pauseBeganAt = nil
+    }
+
+    mutating func pause(at now: CMTime) {
+        // 重复调用不叠加：只有第一次记的时刻算数
+        guard pauseBeganAt == nil else { return }
+        pauseBeganAt = now
+    }
+
+    /// 结束暂停，返回这一次暂停了多久（已经计入累计值）。
+    @discardableResult
+    mutating func resume(at now: CMTime) -> CMTime {
+        guard let began = pauseBeganAt else { return .zero }
+        pauseBeganAt = nil
+        let span = CMTimeSubtract(now, began)
+        // 时钟回绕或者同一时刻就恢复，都当作没暂停
+        guard CMTimeCompare(span, .zero) > 0 else { return .zero }
+        pausedDuration = CMTimeAdd(pausedDuration, span)
+        return span
+    }
+
+    /// 采集时间戳 → 文件时间戳
+    func map(_ pts: CMTime) -> CMTime {
+        guard CMTimeCompare(pausedDuration, .zero) != 0 else { return pts }
+        return CMTimeSubtract(pts, pausedDuration)
+    }
+}
+
 /// 录制文件（.mov）的创建逻辑。
 ///
 /// 单独抽出来是为了能在没有摄像头的情况下做端到端自检 —— 见 `Tests/Recorder/main.swift`，

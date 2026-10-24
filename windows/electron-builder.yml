@@ -1,0 +1,32 @@
+appId: com.local.facecover.windows
+productName: 脸罩 FaceCover
+directories:
+  output: release
+files:
+  - dist/**/*
+  - package.json
+extraResources:
+  # 11 款脸罩素材单一来源在仓库根的 Resources/，打包时直接带走，不复制副本
+  - from: ../Resources
+    to: covers
+    filter:
+      - Cover-*.png
+  - from: assets
+    to: assets
+asarUnpack:
+  - "**/*.onnx"
+win:
+  icon: assets/AppIcon.png
+  target:
+    - nsis
+    - zip
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  artifactName: FaceCover-${version}-setup.${ext}
+mac:
+  icon: assets/AppIcon.png
+  target:
+    - dmg
+  category: public.app-category.video
+  identity: null

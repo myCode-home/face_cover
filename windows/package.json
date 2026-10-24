@@ -1,0 +1,26 @@
+{
+  "name": "facecover-windows",
+  "productName": "脸罩 FaceCover",
+  "version": "0.1.0",
+  "description": "录视频时用一张图片盖住自己的脸（Windows 版）",
+  "main": "dist/main/main.js",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.main.json && tsc -p tsconfig.preload.json && tsc -p tsconfig.renderer.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.preload.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "start": "npm run build && electron .",
+    "dist:win": "npm run build && electron-builder --win nsis zip",
+    "dist:mac": "npm run build && electron-builder --mac dmg"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "@techstark/opencv-js": "4.10.0-release.1"
+  }
+}

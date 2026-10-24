@@ -49,3 +49,39 @@ jobs:
           path: dist/图标预览.png
           if-no-files-found: warn
           retention-days: 14
+
+  windows-package:
+    name: Windows 打包
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 上次移植（face_cover_x）的教训：不能只在 mac 上验证。Windows 侧每次提交
+      # 都要在真实 Windows runner 上跑单元测试并打出安装包。
+      - name: 安装依赖
+        run: npm ci
+        working-directory: windows
+
+      - name: 单元测试（core 纯逻辑 36 条断言）
+        run: npm test
+        working-directory: windows
+
+      - name: 打包 NSIS + ZIP
+        run: npm run dist:win
+        working-directory: windows
+
+      - name: 上传 Windows 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: FaceCover-windows
+          path: |
+            windows/release/*-setup.exe
+            windows/release/*.zip
+          if-no-files-found: error
+          retention-days: 14

@@ -75,7 +75,7 @@ export class SingleFaceTracker {
   state(): SingleState | null {
     if (!this.center || !this.size) return null
     return {
-      current: { ...this.center, ...this.size } as FaceBox,
+      current: { cx: this.center.x, cy: this.center.y, w: this.size.x, h: this.size.y },
       predicted: {
         cx: this.center.x + this.velocity.x * TRACKER_CONST.leadTime,
         cy: this.center.y + this.velocity.y * TRACKER_CONST.leadTime,

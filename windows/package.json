@@ -6,7 +6,7 @@
   "main": "dist/main/main.js",
   "private": true,
   "scripts": {
-    "build": "tsc -p tsconfig.main.json && tsc -p tsconfig.preload.json && tsc -p tsconfig.renderer.json",
+    "build": "tsc -p tsconfig.main.json && tsc -p tsconfig.preload.json && tsc -p tsconfig.renderer.json && node scripts/copy-static.mjs",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.preload.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "start": "npm run build && electron .",
@@ -21,6 +21,8 @@
     "vitest": "^2.1.8"
   },
   "dependencies": {
-    "@techstark/opencv-js": "4.10.0-release.1"
+    "fix-webm-duration": "^1.0.6",
+    "onnxruntime-web": "^1.30.0",
+    "ts-ebml": "^3.0.2"
   }
 }

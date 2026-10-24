@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; connect-src 'self' data: blob:; img-src 'self' file: data: blob:; media-src 'self' file: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' blob:" />
+  <title>脸罩 FaceCover</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="titlebar">
+      <div class="traffic">
+        <button class="tl close" id="tl-close" title="关闭"></button>
+        <button class="tl min" id="tl-min" title="最小化"></button>
+        <button class="tl max" id="tl-max" title="放大"></button>
+      </div>
+      <div class="title">脸罩 FaceCover</div>
+    </header>
+
+    <div class="content">
+      <main class="preview" id="preview-area">
+        <video id="camera" playsinline muted class="hidden"></video>
+        <div class="video-stack">
+          <canvas id="record-canvas"></canvas>
+          <canvas id="debug-canvas"></canvas>
+        </div>
+        <div class="badge gray" id="status-badge">
+          <span class="dot"></span><span class="badge-text">启动中…</span>
+        </div>
+        <div class="drop-hint">松手把这张图设为脸罩</div>
+      </main>
+
+      <div class="divider"></div>
+
+      <aside class="sidebar">
+        <div class="sidebar-scroll">
+          <!-- 脸罩 -->
+          <section class="card">
+            <div class="card-head">
+              <span>🎭</span><span>脸罩</span>
+              <span class="spacer"></span>
+              <button class="link-btn hidden" id="btn-clear-cover">清除</button>
+            </div>
+            <div class="tiles">
+              <button class="tile" id="tile-builtin">
+                <div class="tile-img"><span class="glyph">🎭</span></div>
+                <div class="tile-name">内置脸罩</div>
+                <div class="tile-badge"><span id="builtin-badge">11 款</span><span class="check">✔</span></div>
+              </button>
+              <button class="tile" id="tile-custom">
+                <div class="tile-img"><span class="glyph">🖼️</span></div>
+                <div class="tile-name">自定义图片</div>
+                <div class="tile-badge"><span id="custom-badge">PNG / 拖拽</span><span class="check">✔</span></div>
+              </button>
+            </div>
+            <div class="cover-list hidden" id="cover-list">
+              <div class="list-head"><span>选择脸罩</span><button class="link-btn" id="btn-collapse">收起</button></div>
+              <div class="group-title">头套（脸从开口里露出来）</div>
+              <div class="cover-grid" id="grid-hoods"></div>
+              <div class="group-title">整脸覆盖（角色自己的脸把你盖住）</div>
+              <div class="cover-grid" id="grid-masks"></div>
+              <div class="hint">
+                也可以直接把图片拖到左边的预览画面上。不选脸罩也能直接录制原画。
+                换脸罩会自动把大小和位置复位成该款的默认值。
+              </div>
+            </div>
+          </section>
+
+          <!-- 位置与大小 -->
+          <section class="card">
+            <div class="card-head">
+              <span>🎛️</span><span>位置与大小</span>
+              <span class="spacer"></span>
+              <button class="link-btn hidden" id="btn-reset-all">全部复位</button>
+            </div>
+            <div class="row">
+              <span class="row-label">自动跟随人脸</span>
+              <input type="checkbox" class="switch" id="sw-tracking" checked />
+            </div>
+            <div class="slider-row">
+              <span class="row-label">大小</span>
+              <input type="range" id="sl-size" min="0.4" max="6.0" step="0.01" />
+              <span class="value" id="sl-size-value">1.50×</span>
+              <button class="reset-btn" id="rs-size" title="复位大小">↺</button>
+            </div>
+            <div class="slider-row">
+              <span class="row-label">左右</span>
+              <input type="range" id="sl-x" min="-2.0" max="2.0" step="0.01" />
+              <span class="value" id="sl-x-value">+0.00</span>
+              <button class="reset-btn" id="rs-x" title="复位左右">↺</button>
+            </div>
+            <div class="slider-row">
+              <span class="row-label">上下</span>
+              <input type="range" id="sl-y" min="-2.0" max="2.0" step="0.01" />
+              <span class="value" id="sl-y-value">-0.20</span>
+              <button class="reset-btn" id="rs-y" title="复位上下">↺</button>
+            </div>
+          </section>
+
+          <!-- 画面 -->
+          <section class="card">
+            <div class="card-head"><span>🖥️</span><span>画面</span></div>
+            <div class="row">
+              <span class="row-label">画面镜像</span>
+              <input type="checkbox" class="switch" id="sw-mirror" checked />
+            </div>
+            <div class="row">
+              <span class="row-label">显示人脸检测框
+                <div class="row-sub">在预览上画出检测到的人脸位置，只画在预览里，不会进视频。</div>
+              </span>
+              <input type="checkbox" class="switch" id="sw-debug" />
+            </div>
+          </section>
+
+          <!-- 录制质量 -->
+          <section class="card">
+            <div class="card-head"><span>🎚️</span><span>录制质量</span></div>
+            <div class="select-row"><span class="row-label">分辨率</span>
+              <select id="sel-resolution">
+                <option value="p480">480p</option>
+                <option value="p720" selected>720p</option>
+                <option value="p1080">1080p</option>
+              </select>
+            </div>
+            <div class="select-row"><span class="row-label">帧率</span>
+              <select id="sel-fps">
+                <option value="15">15 fps</option>
+                <option value="24" selected>24 fps</option>
+                <option value="30">30 fps</option>
+              </select>
+            </div>
+            <div class="select-row"><span class="row-label">画质</span>
+              <select id="sel-quality">
+                <option value="compact">省空间</option>
+                <option value="standard" selected>标准</option>
+                <option value="high">高画质</option>
+              </select>
+            </div>
+            <div class="hint" id="quality-hint">约 19.5 MB/分钟（估算）· 设置会记住，录制中不可修改</div>
+          </section>
+
+          <!-- 声音 -->
+          <section class="card">
+            <div class="card-head"><span>🎙️</span><span>声音</span></div>
+            <div class="select-row"><span class="row-label">录制时录什么声音</span>
+              <select id="sel-audio">
+                <option value="none">不录声音</option>
+                <option value="microphone" selected>只录麦克风</option>
+                <option value="system">只录系统声音</option>
+                <option value="both">麦克风 + 系统声音</option>
+              </select>
+            </div>
+            <div class="warning" id="audio-warning"><span>⚠️</span><span id="audio-warning-text"></span></div>
+          </section>
+
+          <!-- 摄像头 -->
+          <section class="card">
+            <div class="card-head"><span>📹</span><span>摄像头</span></div>
+            <div class="select-row"><span class="row-label">设备</span>
+              <select id="sel-camera"><option value="">还没有检测到摄像头。</option></select>
+            </div>
+          </section>
+
+          <!-- 文件 -->
+          <section class="card">
+            <div class="card-head"><span>📁</span><span>文件</span></div>
+            <div class="btn-row">
+              <button class="btn" id="btn-library">🎬 录像库</button>
+              <button class="btn" id="btn-open-dir">📂 打开文件夹</button>
+            </div>
+          </section>
+        </div>
+
+        <div class="record-bar">
+          <button class="btn-primary" id="btn-record">
+            <span id="record-icon">⏺</span><span id="record-label">开始录制</span>
+            <kbd id="record-kbd">Ctrl+↩</kbd>
+          </button>
+          <button class="btn-pause hidden" id="btn-pause" title="暂停录制（Shift+Ctrl+P）">⏸</button>
+          <div class="status-line">
+            <span class="dot" id="status-dot"></span>
+            <span id="status-message">正在启动摄像头…</span>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <dialog id="saved-dialog">
+    <div class="dialog-body">
+      <div class="dialog-title">录像已保存</div>
+      <div class="dialog-content" id="saved-content"></div>
+    </div>
+    <div class="dialog-actions">
+      <button class="btn-accent" id="saved-view">查看</button>
+      <button class="btn" id="saved-ok">好</button>
+    </div>
+  </dialog>
+
+  <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp" hidden />
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

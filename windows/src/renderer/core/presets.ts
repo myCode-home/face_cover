@@ -71,15 +71,12 @@ export function estimateMBPerMinute(width: number, height: number, fps: FrameRat
   return (averageBitRate(width, height, fps, qualityId) * 60) / 8 / 1_000_000 + 1
 }
 
-/** 摄像头约束：目标档位高度 + 帧率上限（达不到时浏览器自行取最近档，不放大）。 */
-export function cameraConstraints(tierId: ResolutionTierId, fps: FrameRateId): MediaStreamConstraints {
+/** 摄像头视频约束：目标档位高度 + 帧率上限（达不到时浏览器自行取最近档，不放大）。 */
+export function cameraConstraints(tierId: ResolutionTierId, fps: FrameRateId): MediaTrackConstraints {
   const tier = resolutionTier(tierId)
   return {
-    audio: false,
-    video: {
-      width: { ideal: tier.requestHeight * (16 / 9) },
-      height: { ideal: tier.requestHeight },
-      frameRate: { ideal: fps, max: fps },
-    },
+    width: { ideal: tier.requestHeight * (16 / 9) },
+    height: { ideal: tier.requestHeight },
+    frameRate: { ideal: fps, max: fps },
   }
 }

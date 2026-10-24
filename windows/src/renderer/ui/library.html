@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; connect-src 'self' data: blob:; img-src 'self' file: data: blob:; media-src 'self' file: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>录像库</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="titlebar">
+      <div class="traffic">
+        <button class="tl close" id="tl-close" title="关闭"></button>
+        <button class="tl min" id="tl-min" title="最小化"></button>
+        <button class="tl max" id="tl-max" title="放大"></button>
+      </div>
+      <div class="title">录像库</div>
+    </header>
+
+    <div class="library">
+      <div class="library-head">
+        <h1>录像库</h1>
+        <span class="stats" id="stats">还没有录像</span>
+        <span class="scan-spinner hidden" id="scan-spinner"></span>
+        <button class="btn" id="btn-refresh" style="flex:none">↻ 刷新</button>
+        <button class="btn" id="btn-open-dir" style="flex:none">📂 打开文件夹</button>
+      </div>
+      <div class="library-banner" id="banner">
+        <span>⚠️</span><span id="banner-text"></span>
+        <button class="link-btn" id="banner-ok">知道了</button>
+      </div>
+      <div class="library-list" id="list"></div>
+    </div>
+  </div>
+
+  <dialog id="confirm-dialog">
+    <div class="dialog-body">
+      <div class="dialog-title">把这段录像移到废纸篓？</div>
+      <div class="dialog-content" id="confirm-content"></div>
+    </div>
+    <div class="dialog-actions">
+      <button class="btn-accent destructive" id="confirm-yes">移到废纸篓</button>
+      <button class="btn" id="confirm-no">取消</button>
+    </div>
+  </dialog>
+
+  <script type="module" src="./library.js"></script>
+</body>
+</html>

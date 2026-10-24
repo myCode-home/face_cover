@@ -13,8 +13,6 @@ extraResources:
       - Cover-*.png
   - from: assets
     to: assets
-asarUnpack:
-  - "**/*.onnx"
 win:
   icon: assets/AppIcon.png
   target:

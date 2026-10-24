@@ -36,12 +36,12 @@ export function createMainWindow(smokeMode = false): BrowserWindow {
   return mainWindow
 }
 
-/** dev 下把渲染进程的输出转出来，不然窗口白屏只能干瞪眼 */
+/** 把渲染进程的输出转出来；打包版只在 --smoke 自检时转（平时别往 stdout 塞东西） */
 function forwardRendererConsole(win: BrowserWindow, label: string): void {
-  if (app.isPackaged) return
+  if (app.isPackaged && !process.argv.includes('--smoke')) return
   win.webContents.on('did-finish-load', () => console.log(`[${label}] 渲染进程加载完成`))
-  win.webContents.on('console-message', (_e, _level, message, line, sourceId) => {
-    console.log(`[${label}] ${message} (${sourceId}:${line})`)
+  win.webContents.on('console-message', (_e, _level, message, _line, _sourceId) => {
+    console.log(`[${label}] ${message}`)
   })
 }
 

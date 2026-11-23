@@ -25,6 +25,45 @@
 
 只需要 macOS 自带的 Command Line Tools，**不需要装完整的 Xcode**。
 
+## Windows 版
+
+`windows/` 目录是同一套东西的 Windows 实现，UI 按 macOS 版的美学复刻
+（无框窗口 + 自绘红绿灯标题栏，两个平台长得一样）。技术栈是
+**Electron + TypeScript**：摄像头走 getUserMedia（底层 Media Foundation）、
+系统声音走 Chromium 的 loopback（**Windows 原生支持，不用装 BlackHole
+之类的虚拟声卡，也没有 macOS 那个「屏幕录制」权限**）、人脸检测用
+onnxruntime-web 跑 YuNet（模型在 `windows/assets/models/`）。
+
+```bash
+cd windows
+npm install
+npm start               # 开发运行（编译 + 起应用）
+npm test                # core 纯逻辑 36 条断言（跟踪/档位/解码/格式化）
+npx electron . --smoke  # 无人值守端到端自检：假摄像头跑完 录制→暂停→落盘→库→时长
+npm run dist:win        # 出 NSIS 安装包 + ZIP（release/）
+npm run dist:mac        # mac 上顺手打个 DMG（开发调试用）
+```
+
+CI 里有独立的 **windows-latest job**：每次提交都在真实 Windows 上跑单元
+测试并打出安装包（artifact 里下载）。上次移植的教训是「只在 mac 上验证」，
+这次从流程上堵死。
+
+### 和 macOS 版的行为差异
+
+| 项 | macOS 版 | Windows 版 | 为什么 |
+|---|---|---|---|
+| 录像格式 | `.mov` (H.264 + AAC) | `.webm` (VP8 + Opus) | 实测 Electron 33 的 MP4 封装器**一旦暂停就间歇性产出 0 字节**（连探针验证都不可靠），暂停是核心功能，只能确定性用 webm。Windows 自带播放器直接能放 |
+| 暂停 | RecordingTimeline 时间戳补偿 | MediaRecorder 原生 pause/resume | Chromium 会把暂停时长整个排除出时间线，效果等价（自检实测 2s+2s 片段时长恰为 4.0s） |
+| 系统声音 | ScreenCaptureKit（要「屏幕录制」权限） | WASAPI loopback（免权限） | 平台能力不同；录自己 App 的声音两边都排除了 |
+| 录像目录 | `~/Movies/FaceCover/` | `视频\FaceCover\` | 各自的平台惯例；在 mac 上开发时两边看同一个目录 |
+| 快捷键 | ⌘↩ / ⇧⌘P | Ctrl+Enter / Shift+Ctrl+P | 键盘没有 ⌘ |
+| 摄像头档位 | AVCaptureSession preset | getUserMedia 约束 | 码率表、上限语义、偶数取整完全一致 |
+
+录像库、已保存弹窗、定位高亮（0.20 → 1.4s 后收 0.07）、诊断日志
+（`诊断.txt`，同一行格式）、暂停按钮（录制中橙色、计时冻结）都按
+macOS 版逐项复刻；11 款脸罩素材直接引用仓库根的 `Resources/`，不复制副本。
+
+
 ### 分发
 
 `./package.sh` 会产出两个文件（版本号取自 `Resources/Info.plist` 的
